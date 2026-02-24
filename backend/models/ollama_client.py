@@ -8,7 +8,12 @@ class OllamaClient:
         self.host = host or settings.ollama_host
         self.model = model or settings.ollama_model
 
-    async def complete(self, prompt: str, system: str | None = None) -> str:
+    async def complete(
+        self,
+        prompt: str,
+        system: str | None = None,
+        options: dict | None = None,
+    ) -> str:
         payload = {
             "model": self.model,
             "prompt": prompt,
@@ -16,6 +21,8 @@ class OllamaClient:
         }
         if system:
             payload["system"] = system
+        if options:
+            payload["options"] = options
 
         async with httpx.AsyncClient(timeout=120.0) as client:
             response = await client.post(f"{self.host}/api/generate", json=payload)
