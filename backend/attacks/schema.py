@@ -32,4 +32,7 @@ class TestCase(BaseModel):
     # benign tool_agent cases
     expected_tool: str | None = None
 
+    # benign rag_assistant cases
+    expected_keywords: list[str] | None = None
+
     notes: str | None = None
