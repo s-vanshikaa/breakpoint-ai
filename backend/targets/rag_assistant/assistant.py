@@ -2,6 +2,8 @@ import time
 
 from pydantic import BaseModel
 
+from guardrails.input_guardrail import REFUSAL_MESSAGE, check_input
+from guardrails.retrieval_guardrail import filter_retrieved_chunks
 from models.ollama_client import ollama_client
 from targets.rag_assistant.index import VectorIndex
 
@@ -22,6 +24,7 @@ class RAGResult(BaseModel):
     retrieved_chunks: list[RetrievedChunk]
     model: str
     latency_ms: float
+    block_reason: str | None = None
 
 
 class RAGAssistant:
@@ -29,14 +32,31 @@ class RAGAssistant:
         self.index = index if index is not None else VectorIndex()
         self.top_k = top_k
 
-    async def answer(self, query: str) -> RAGResult:
+    async def answer(self, query: str, guardrails_enabled: bool = False) -> RAGResult:
         start = time.perf_counter()
+
+        if guardrails_enabled:
+            block_reason = check_input(query)
+            if block_reason:
+                return RAGResult(
+                    response=REFUSAL_MESSAGE,
+                    retrieved_chunks=[],
+                    model=ollama_client.model,
+                    latency_ms=(time.perf_counter() - start) * 1000,
+                    block_reason=block_reason,
+                )
 
         results = self.index.search(query, top_k=self.top_k)
         retrieved_chunks = [
             RetrievedChunk(text=chunk.text, source=chunk.source, score=score)
             for chunk, score in results
         ]
+
+        if guardrails_enabled:
+            retrieved_chunks = [
+                RetrievedChunk(text=text, source=source, score=score)
+                for text, source, score in filter_retrieved_chunks(retrieved_chunks)
+            ]
 
         context = "\n\n---\n\n".join(
             f"[Source: {c.source}]\n{c.text}" for c in retrieved_chunks

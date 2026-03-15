@@ -17,6 +17,7 @@ class TestRecord(BaseModel):
     reason: str
     latency_ms: float
     guardrails_enabled: bool
+    block_reason: str | None = None
 
 
 class CategorySummary(BaseModel):

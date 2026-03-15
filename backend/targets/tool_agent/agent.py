@@ -3,6 +3,8 @@ import json
 import re
 import time
 
+from guardrails.input_guardrail import REFUSAL_MESSAGE, check_input
+from guardrails.tool_permission_guardrail import check_tool_permission
 from models.ollama_client import ollama_client
 from targets.tool_agent.permissions import permission_for
 from targets.tool_agent.schema import AgentResult, ToolCall, ToolExecutionResult
@@ -77,8 +79,20 @@ def _call_tool_safely(tool_fn, arguments: dict[str, str]) -> str:
 
 
 class ToolAgent:
-    async def handle(self, prompt: str) -> AgentResult:
+    async def handle(self, prompt: str, guardrails_enabled: bool = False) -> AgentResult:
         start = time.perf_counter()
+
+        if guardrails_enabled:
+            input_block_reason = check_input(prompt)
+            if input_block_reason:
+                return AgentResult(
+                    response=REFUSAL_MESSAGE,
+                    requested_tool_call=None,
+                    executed_tool_call=None,
+                    model=ollama_client.model,
+                    latency_ms=(time.perf_counter() - start) * 1000,
+                    block_reason=input_block_reason,
+                )
 
         raw_decision = await ollama_client.complete(
             prompt, system=SYSTEM_PROMPT, options={"temperature": 0.1}
@@ -88,6 +102,7 @@ class ToolAgent:
         tool_name = decision.get("tool")
         requested_tool_call: ToolCall | None = None
         executed_tool_call: ToolExecutionResult | None = None
+        block_reason: str | None = None
 
         if not tool_name:
             response = decision.get("message") or raw_decision.strip()
@@ -98,6 +113,9 @@ class ToolAgent:
             tool_fn = TOOL_REGISTRY.get(tool_name)
             if tool_fn is None:
                 response = f"Requested an unknown tool: {tool_name}."
+            elif guardrails_enabled and (permission_block_reason := check_tool_permission(tool_name)):
+                block_reason = permission_block_reason
+                response = "That action requires elevated permissions I'm not authorized to grant."
             else:
                 try:
                     result = _call_tool_safely(tool_fn, arguments)
@@ -126,4 +144,5 @@ class ToolAgent:
             executed_tool_call=executed_tool_call,
             model=ollama_client.model,
             latency_ms=latency_ms,
+            block_reason=block_reason,
         )

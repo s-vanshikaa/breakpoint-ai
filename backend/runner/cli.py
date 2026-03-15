@@ -13,7 +13,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--guardrails",
         action="store_true",
-        help="Mark this run as guardrails-enabled (no-op until guardrails exist).",
+        help="Run with input, retrieval, and tool-permission guardrails enabled.",
     )
     parser.add_argument("--output", help="Path to save results as JSON.")
     return parser.parse_args()

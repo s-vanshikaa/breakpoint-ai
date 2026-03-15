@@ -14,7 +14,7 @@ async def run_test_case(
     guardrails_enabled: bool = False,
 ) -> TestRecord:
     if test_case.target.value == "rag_assistant":
-        result = await rag_assistant.answer(test_case.prompt)
+        result = await rag_assistant.answer(test_case.prompt, guardrails_enabled=guardrails_enabled)
         evaluation = evaluate_test_case(test_case, response_text=result.response)
         return TestRecord(
             test_id=test_case.id,
@@ -27,9 +27,10 @@ async def run_test_case(
             reason=evaluation.reason,
             latency_ms=result.latency_ms,
             guardrails_enabled=guardrails_enabled,
+            block_reason=result.block_reason,
         )
 
-    result = await tool_agent.handle(test_case.prompt)
+    result = await tool_agent.handle(test_case.prompt, guardrails_enabled=guardrails_enabled)
     evaluation = evaluate_test_case(
         test_case,
         response_text=result.response,
@@ -47,6 +48,7 @@ async def run_test_case(
         reason=evaluation.reason,
         latency_ms=result.latency_ms,
         guardrails_enabled=guardrails_enabled,
+        block_reason=result.block_reason,
     )
 
 

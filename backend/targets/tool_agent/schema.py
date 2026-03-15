@@ -19,3 +19,4 @@ class AgentResult(BaseModel):
     executed_tool_call: ToolExecutionResult | None
     model: str
     latency_ms: float
+    block_reason: str | None = None
