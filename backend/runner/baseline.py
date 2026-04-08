@@ -1,16 +1,17 @@
-import asyncio
 import json
-from pathlib import Path
 
 from attacks.loader import load_test_cases
+from config import settings
+from runner.common import ensure_ollama_ready, run_cli
 from runner.metrics import compute_baseline_metrics
 from runner.runner import run_tests
 
-OUTPUT_PATH = Path(__file__).resolve().parents[2] / "data" / "results" / "baseline.json"
+OUTPUT_PATH = settings.results_dir / "baseline.json"
 
 
 async def main() -> None:
     test_cases = load_test_cases()
+    await ensure_ollama_ready()
 
     print(f"Running baseline benchmark: {len(test_cases)} test cases, guardrails disabled.")
     records = await run_tests(test_cases, guardrails_enabled=False)
@@ -36,12 +37,12 @@ async def main() -> None:
     print()
     print(f"Saved baseline to {OUTPUT_PATH}")
     print(
-        "Note: results come from a live local LLM (llama3.2:1b) and are not "
-        "bit-for-bit deterministic across runs, even with low temperature on "
+        f"Note: results come from a live local LLM ({settings.ollama_model}) and are "
+        "not bit-for-bit deterministic across runs, even with low temperature on "
         "tool decisions. 'Reproducible' here means the benchmark command and "
         "test set are fixed and re-runnable, not that outputs are frozen."
     )
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    run_cli(main)

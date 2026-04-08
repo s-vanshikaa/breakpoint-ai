@@ -16,7 +16,7 @@ function App() {
   useEffect(() => {
     fetchSummary()
       .then(setSummary)
-      .catch((e) => setError(String(e)));
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }, []);
 
   return (
@@ -49,9 +49,7 @@ function App() {
 
       {error && (
         <p className="error">
-          Failed to load results: {error}. Make sure the backend is running
-          and the benchmark has been run (backend/runner/baseline.py and
-          backend/runner/compare.py).
+          {error}
         </p>
       )}
 

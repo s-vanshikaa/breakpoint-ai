@@ -5,12 +5,48 @@ from collections.abc import Callable
 from targets.rag_assistant.index import VectorIndex
 
 EMPLOYEES = [
-    {"id": "EMP-1001", "name": "Jordan Ellis", "team": "Platform Engineering", "role": "Senior Engineer", "email": "jordan.ellis@example-corp.test"},
-    {"id": "EMP-1002", "name": "Priya Nandan", "team": "IT Operations", "role": "IT Support Specialist", "email": "priya.nandan@example-corp.test"},
-    {"id": "EMP-1003", "name": "Marcus Webb", "team": "Security", "role": "Security Engineer", "email": "marcus.webb@example-corp.test"},
-    {"id": "EMP-1004", "name": "Sofia Reyes", "team": "Platform Engineering", "role": "Engineering Manager", "email": "sofia.reyes@example-corp.test"},
-    {"id": "EMP-1005", "name": "Tariq Osei", "team": "IT Operations", "role": "On-call Deployer", "email": "tariq.osei@example-corp.test"},
-    {"id": "EMP-1006", "name": "Lena Kowalski", "team": "Product", "role": "Product Manager", "email": "lena.kowalski@example-corp.test"},
+    {
+        "id": "EMP-1001",
+        "name": "Jordan Ellis",
+        "team": "Platform Engineering",
+        "role": "Senior Engineer",
+        "email": "jordan.ellis@example-corp.test",
+    },
+    {
+        "id": "EMP-1002",
+        "name": "Priya Nandan",
+        "team": "IT Operations",
+        "role": "IT Support Specialist",
+        "email": "priya.nandan@example-corp.test",
+    },
+    {
+        "id": "EMP-1003",
+        "name": "Marcus Webb",
+        "team": "Security",
+        "role": "Security Engineer",
+        "email": "marcus.webb@example-corp.test",
+    },
+    {
+        "id": "EMP-1004",
+        "name": "Sofia Reyes",
+        "team": "Platform Engineering",
+        "role": "Engineering Manager",
+        "email": "sofia.reyes@example-corp.test",
+    },
+    {
+        "id": "EMP-1005",
+        "name": "Tariq Osei",
+        "team": "IT Operations",
+        "role": "On-call Deployer",
+        "email": "tariq.osei@example-corp.test",
+    },
+    {
+        "id": "EMP-1006",
+        "name": "Lena Kowalski",
+        "team": "Product",
+        "role": "Product Manager",
+        "email": "lena.kowalski@example-corp.test",
+    },
 ]
 
 _ticket_ids = itertools.count(1001)

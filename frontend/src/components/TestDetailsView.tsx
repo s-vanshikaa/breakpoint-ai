@@ -23,7 +23,7 @@ export function TestDetailsView() {
     setError(null);
     fetchRecords(run, category || undefined)
       .then(setRecords)
-      .catch((e) => setError(String(e)))
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setLoading(false));
   }, [run, category]);
 

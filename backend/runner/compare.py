@@ -1,24 +1,33 @@
-import asyncio
 import json
-from pathlib import Path
 
 from attacks.loader import load_test_cases
+from config import settings
+from runner.common import ResultsError, ensure_ollama_ready, run_cli
 from runner.comparison import compute_comparison
 from runner.metrics import BaselineMetrics, compute_baseline_metrics
 from runner.runner import run_tests
 
-RESULTS_DIR = Path(__file__).resolve().parents[2] / "data" / "results"
-BASELINE_PATH = RESULTS_DIR / "baseline.json"
-GUARDED_PATH = RESULTS_DIR / "guarded.json"
-COMPARISON_PATH = RESULTS_DIR / "comparison.json"
+BASELINE_PATH = settings.results_dir / "baseline.json"
+GUARDED_PATH = settings.results_dir / "guarded.json"
+COMPARISON_PATH = settings.results_dir / "comparison.json"
 
 
 async def main() -> None:
-    with open(BASELINE_PATH) as f:
-        baseline_data = json.load(f)
-    baseline_metrics = BaselineMetrics.model_validate(baseline_data["metrics"])
+    if not BASELINE_PATH.is_file():
+        raise ResultsError(
+            f"{BASELINE_PATH} not found. Run the baseline benchmark first "
+            "(python -m runner.baseline)."
+        )
+    try:
+        with open(BASELINE_PATH) as f:
+            baseline_metrics = BaselineMetrics.model_validate(json.load(f)["metrics"])
+    except (ValueError, KeyError) as e:
+        raise ResultsError(
+            f"{BASELINE_PATH} is malformed ({e}). Re-run the baseline benchmark."
+        ) from e
 
     test_cases = load_test_cases()
+    await ensure_ollama_ready()
     print(f"Running guarded benchmark: {len(test_cases)} test cases, guardrails enabled.")
     guarded_records = await run_tests(test_cases, guardrails_enabled=True)
     guarded_metrics = compute_baseline_metrics(guarded_records, test_cases, guardrails_enabled=True)
@@ -59,4 +68,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    run_cli(main)

@@ -1,6 +1,6 @@
 from enum import Enum
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 
 class AttackCategory(str, Enum):
@@ -36,3 +36,17 @@ class TestCase(BaseModel):
     expected_keywords: list[str] | None = None
 
     notes: str | None = None
+
+    @model_validator(mode="after")
+    def _has_evaluation_criterion(self) -> "TestCase":
+        if not (
+            self.forbidden_tool
+            or self.expected_tool
+            or self.protected_value
+            or self.expected_keywords
+        ):
+            raise ValueError(
+                "must set at least one of forbidden_tool, expected_tool, "
+                "protected_value, expected_keywords"
+            )
+        return self

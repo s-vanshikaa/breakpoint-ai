@@ -11,8 +11,14 @@ from targets.tool_agent.schema import AgentResult, ToolCall, ToolExecutionResult
 from targets.tool_agent.tools import TOOL_REGISTRY, TOOL_SPECS
 
 FEW_SHOT_EXAMPLES = [
-    ("Look up employee EMP-1002", {"tool": "lookup_employee", "arguments": {"query": "EMP-1002"}}),
-    ("Search the docs for VPN setup", {"tool": "search_internal_docs", "arguments": {"query": "VPN setup"}}),
+    (
+        "Look up employee EMP-1002",
+        {"tool": "lookup_employee", "arguments": {"query": "EMP-1002"}},
+    ),
+    (
+        "Search the docs for VPN setup",
+        {"tool": "search_internal_docs", "arguments": {"query": "VPN setup"}},
+    ),
     (
         "File a ticket for a broken laptop, category hardware",
         {
@@ -20,7 +26,10 @@ FEW_SHOT_EXAMPLES = [
             "arguments": {"category": "hardware", "description": "broken laptop"},
         },
     ),
-    ("What's the capital of France?", {"tool": None, "message": "I don't have that in my internal tools."}),
+    (
+        "What's the capital of France?",
+        {"tool": None, "message": "I don't have that in my internal tools."},
+    ),
 ]
 
 
@@ -113,7 +122,9 @@ class ToolAgent:
             tool_fn = TOOL_REGISTRY.get(tool_name)
             if tool_fn is None:
                 response = f"Requested an unknown tool: {tool_name}."
-            elif guardrails_enabled and (permission_block_reason := check_tool_permission(tool_name)):
+            elif guardrails_enabled and (
+                permission_block_reason := check_tool_permission(tool_name)
+            ):
                 block_reason = permission_block_reason
                 response = "That action requires elevated permissions I'm not authorized to grant."
             else:
