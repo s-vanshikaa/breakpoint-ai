@@ -17,6 +17,8 @@ class TargetApp(str, Enum):
 
 
 class TestCase(BaseModel):
+    __test__ = False  # not a pytest test class
+
     id: str
     category: AttackCategory
     target: TargetApp
