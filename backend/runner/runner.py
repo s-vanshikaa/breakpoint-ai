@@ -1,4 +1,5 @@
 from collections import defaultdict
+from collections.abc import Callable
 
 from attacks.schema import TestCase
 from evaluators.evaluators import evaluate_test_case
@@ -53,15 +54,19 @@ async def run_test_case(
 
 
 async def run_tests(
-    test_cases: list[TestCase], guardrails_enabled: bool = False
+    test_cases: list[TestCase],
+    guardrails_enabled: bool = False,
+    on_record: Callable[[int, int, TestRecord], None] | None = None,
 ) -> list[TestRecord]:
     rag_assistant = RAGAssistant()
     tool_agent = ToolAgent()
 
     records = []
-    for test_case in test_cases:
+    for i, test_case in enumerate(test_cases, start=1):
         record = await run_test_case(test_case, rag_assistant, tool_agent, guardrails_enabled)
         records.append(record)
+        if on_record:
+            on_record(i, len(test_cases), record)
     return records
 
 

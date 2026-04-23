@@ -25,6 +25,8 @@ class OllamaClient:
         self.host = (host or settings.ollama_host).rstrip("/")
         self.model = model or settings.ollama_model
         self.timeout = timeout or settings.ollama_timeout_seconds
+        # Applied to every request (e.g. {"seed": 42}); per-call options take precedence.
+        self.default_options: dict = {}
 
     def _unavailable(self) -> OllamaUnavailableError:
         return OllamaUnavailableError(
@@ -67,8 +69,9 @@ class OllamaClient:
         }
         if system:
             payload["system"] = system
-        if options:
-            payload["options"] = options
+        merged_options = {**self.default_options, **(options or {})}
+        if merged_options:
+            payload["options"] = merged_options
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
