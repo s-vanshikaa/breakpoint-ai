@@ -1,8 +1,7 @@
 :root {
   font-family: system-ui, "Segoe UI", Roboto, sans-serif;
   line-height: 1.5;
-  color: #1f2328;
-  background: #fff;
+  color-scheme: light dark;
   -webkit-font-smoothing: antialiased;
 }
 
