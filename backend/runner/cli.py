@@ -113,7 +113,7 @@ async def _cmd_run_adhoc(args: argparse.Namespace) -> None:
     await ensure_ollama_ready()
     ollama_client.default_options = {"seed": args.seed} if args.seed is not None else {}
     print(f"Running {len(cases)} test case(s) (guardrails_enabled={args.guardrails})...")
-    records = await run_tests(cases, args.guardrails, on_record=workflow._progress)
+    records = await run_tests(cases, args.guardrails, on_record=workflow.print_progress)
     summary = summarize(records, guardrails_enabled=args.guardrails)
 
     print(

@@ -42,7 +42,7 @@ def load_run(path: Path, hint: str) -> StoredRun:
         raise ResultsError(f"{path} is malformed ({e}). {hint}") from e
 
 
-def _progress(index: int, total: int, record: TestRecord) -> None:
+def print_progress(index: int, total: int, record: TestRecord) -> None:
     status = "PASS" if record.passed else "FAIL"
     print(f"  [{index:>{len(str(total))}}/{total}] {record.test_id:<16}{status}", flush=True)
 
@@ -64,7 +64,7 @@ async def execute_run(
         f"guardrails {'ON' if guardrails_enabled else 'OFF'}, "
         f"model {ollama_client.model}, seed {seed_text}"
     )
-    records = await run_tests(test_cases, guardrails_enabled, on_record=_progress)
+    records = await run_tests(test_cases, guardrails_enabled, on_record=print_progress)
     metrics = compute_baseline_metrics(records, test_cases, guardrails_enabled=guardrails_enabled)
     meta = {
         "run": name,
