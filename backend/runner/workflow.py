@@ -26,7 +26,7 @@ def run_path(results_dir: Path, name: str) -> Path:
     return results_dir / f"{name}.json"
 
 
-def _write_json(path: Path, data: dict) -> None:
+def write_json(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(data, indent=2))
@@ -74,7 +74,7 @@ async def execute_run(
     }
 
     path = run_path(results_dir, name)
-    _write_json(
+    write_json(
         path,
         {
             "meta": meta,
@@ -115,7 +115,7 @@ def compare_saved_runs(results_dir: Path) -> tuple[ComparisonReport, StoredRun, 
     )
     comparison = build_comparison(baseline, guarded)
     path = results_dir / COMPARISON_FILENAME
-    _write_json(path, comparison.model_dump())
+    write_json(path, comparison.model_dump())
     print(f"Saved comparison to {path}")
     return comparison, baseline, guarded
 

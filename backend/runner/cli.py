@@ -6,6 +6,7 @@
     python -m runner compare      # compare saved baseline/guarded runs (no LLM needed)
     python -m runner all          # baseline + guarded + compare
     python -m runner run          # ad hoc: one test / one category
+    python -m runner experiment   # baseline + guarded over several seeds, with aggregate metrics
 """
 
 import argparse
@@ -17,7 +18,7 @@ from attacks.schema import AttackCategory
 from attacks.validate import find_problems
 from config import settings
 from models.ollama_client import ollama_client
-from runner import report, workflow
+from runner import experiment, report, workflow
 from runner.common import ensure_ollama_ready, run_cli
 from runner.runner import run_tests, summarize
 
@@ -63,6 +64,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_results_dir(p)
 
+    p = sub.add_parser(
+        "experiment",
+        help="Run baseline and guarded for several seeds and aggregate the trials.",
+    )
+    p.add_argument(
+        "--seeds",
+        type=int,
+        nargs="+",
+        default=[1, 2, 3, 4, 5],
+        help="One trial per seed and configuration (default: 1 2 3 4 5).",
+    )
+    p.add_argument(
+        "--experiment-id",
+        default=None,
+        help="Name for the output folder (default: exp-<UTC timestamp>).",
+    )
+    p.add_argument(
+        "--experiments-dir",
+        type=Path,
+        default=None,
+        help=f"Where experiments are written (default: {settings.experiments_dir}).",
+    )
+
     p = sub.add_parser("run", help="Ad hoc run of one test or one category; nothing is saved.")
     p.add_argument("--test-id", help="Run a single test case by ID.")
     p.add_argument("--category", choices=[c.value for c in AttackCategory])
@@ -99,6 +123,17 @@ def _cmd_compare(args: argparse.Namespace) -> None:
     comparison, baseline, guarded = workflow.compare_saved_runs(results_dir)
     print()
     print(report.format_comparison_report(comparison, baseline.records, guarded.records))
+
+
+async def _cmd_experiment(args: argparse.Namespace) -> None:
+    _, aggregate = await experiment.run_experiment(
+        load_test_cases(),
+        args.seeds,
+        args.experiments_dir or settings.experiments_dir,
+        experiment_id=args.experiment_id,
+    )
+    print()
+    print(report.format_experiment_report(aggregate))
 
 
 async def _cmd_run_adhoc(args: argparse.Namespace) -> None:
@@ -145,6 +180,8 @@ async def _dispatch(args: argparse.Namespace) -> None:
         _cmd_compare(args)
     elif args.command == "compare":
         _cmd_compare(args)
+    elif args.command == "experiment":
+        await _cmd_experiment(args)
     else:
         await _cmd_run_adhoc(args)
 

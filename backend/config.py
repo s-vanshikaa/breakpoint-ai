@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     # Comma-separated list of origins allowed to call the API (the dashboard).
     cors_origins: str = "http://localhost:5173"
 
-    # Root of the benchmark data (documents/, test_cases/, results/).
+    # Root of the benchmark data (documents/, test_cases/, results/, experiments/).
     data_dir: Path = REPO_ROOT / "data"
 
     @property
@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     @property
     def results_dir(self) -> Path:
         return self.data_dir / "results"
+
+    @property
+    def experiments_dir(self) -> Path:
+        return self.data_dir / "experiments"
 
 
 settings = Settings()

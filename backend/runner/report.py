@@ -3,13 +3,14 @@
 from collections import Counter
 
 from attacks.schema import TestCase
+from runner.aggregate import BASELINE, GUARDED, ExperimentAggregate, RateSummary
 from runner.comparison import ComparisonReport
 from runner.metrics import BENIGN_CATEGORY, BaselineMetrics
 from runner.schema import TestRecord
 
 
-def pct(value: float) -> str:
-    return f"{value * 100:.1f}%"
+def pct(value: float | None) -> str:
+    return "n/a" if value is None else f"{value * 100:.1f}%"
 
 
 def _pp(delta: float) -> str:
@@ -112,4 +113,55 @@ def format_comparison_report(
         f"Benign tests broken by guardrails ({len(benign_broken)}): "
         f"{', '.join(benign_broken) or 'none'}",
     ]
+    return "\n".join(lines)
+
+
+def _mean_std(rate: RateSummary) -> str:
+    return f"{pct(rate.mean)} +/- {pct(rate.std)}"
+
+
+def format_experiment_report(agg: ExperimentAggregate) -> str:
+    lines = [
+        f"Experiment {agg.experiment_id}: {agg.total_evaluations} evaluations, "
+        f"{agg.trials_completed}/{agg.trials_planned} trials completed "
+        f"(seeds {', '.join(map(str, agg.seeds))})",
+    ]
+    for failed in agg.failed_trials:
+        lines.append(f"  FAILED trial {failed.config} seed {failed.seed}: {failed.error}")
+
+    lines += ["", f"{'':<25}{'Baseline':>20}{'Guarded':>20}"]
+    base, guard = agg.configs[BASELINE], agg.configs[GUARDED]
+    rows = (
+        ("Attack success (mean)", base.asr, guard.asr),
+        ("Tool misuse (mean)", base.tool_misuse_rate, guard.tool_misuse_rate),
+        ("Benign success (mean)", base.benign_success_rate, guard.benign_success_rate),
+    )
+    for label, b, g in rows:
+        lines.append(f"{label:<25}{_mean_std(b):>20}{_mean_std(g):>20}")
+    lines.append(
+        f"{'Attack success (pooled)':<25}{pct(base.asr.pooled):>20}{pct(guard.asr.pooled):>20}"
+    )
+    lines.append(
+        f"{'Latency p50 / p95':<25}"
+        f"{f'{base.latency.p50_ms or 0:.0f} / {base.latency.p95_ms or 0:.0f} ms':>20}"
+        f"{f'{guard.latency.p50_ms or 0:.0f} / {guard.latency.p95_ms or 0:.0f} ms':>20}"
+    )
+
+    comp = agg.comparison
+    if comp is None:
+        lines += ["", "No comparison: both configurations need at least one completed trial."]
+        return "\n".join(lines)
+
+    lines += [
+        "",
+        f"Attack success reduction: {_pp(comp.absolute_asr_reduction or 0)} absolute, "
+        f"{pct(comp.relative_asr_reduction)} relative",
+        "",
+        f"{'Category':<26}{'Baseline':>10}{'Guarded':>10}{'Rel. red.':>11}",
+    ]
+    for category, delta in comp.by_category.items():
+        lines.append(
+            f"{category:<26}{pct(delta.baseline_asr):>10}{pct(delta.guarded_asr):>10}"
+            f"{pct(delta.relative_reduction):>11}"
+        )
     return "\n".join(lines)
