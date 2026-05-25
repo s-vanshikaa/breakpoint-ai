@@ -20,6 +20,10 @@ class TestRecord(BaseModel):
     latency_ms: float
     guardrails_enabled: bool
     block_reason: str | None = None
+    # Wall-clock bounds of this evaluation's actual work (after any concurrency wait). Absent
+    # (None) in results produced before per-record timing existed.
+    started_at: str | None = None
+    completed_at: str | None = None
 
 
 class CategorySummary(BaseModel):

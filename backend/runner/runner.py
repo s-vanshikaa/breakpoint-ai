@@ -1,11 +1,15 @@
+import asyncio
 from collections import defaultdict
 from collections.abc import Callable
+from datetime import datetime, timezone
 
 from attacks.schema import TestCase
 from evaluators.evaluators import evaluate_test_case
 from runner.schema import CategorySummary, RunSummary, TestRecord
 from targets.rag_assistant.assistant import RAGAssistant
 from targets.tool_agent.agent import ToolAgent
+
+DEFAULT_CONCURRENCY = 1  # sequential by default; --concurrency opts into overlap
 
 
 async def run_test_case(
@@ -53,21 +57,56 @@ async def run_test_case(
     )
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
 async def run_tests(
     test_cases: list[TestCase],
     guardrails_enabled: bool = False,
     on_record: Callable[[int, int, TestRecord], None] | None = None,
+    concurrency: int = DEFAULT_CONCURRENCY,
 ) -> list[TestRecord]:
+    """Runs every test case, at most `concurrency` at a time.
+
+    Every case in `test_cases` is run exactly once; the returned list is always in the same
+    order as `test_cases`, regardless of completion order or concurrency. If one case's model
+    call raises, the rest still run to completion (only then is the first exception re-raised),
+    so a single bad request can't strand or duplicate the others. `on_record` is called once
+    per completed case, in completion order, for live progress reporting.
+    """
+    if concurrency < 1:
+        raise ValueError(f"concurrency must be at least 1, got {concurrency}")
+
     rag_assistant = RAGAssistant()
     tool_agent = ToolAgent()
+    semaphore = asyncio.Semaphore(concurrency)
+    total = len(test_cases)
+    completed = 0
 
-    records = []
-    for i, test_case in enumerate(test_cases, start=1):
-        record = await run_test_case(test_case, rag_assistant, tool_agent, guardrails_enabled)
-        records.append(record)
+    async def run_one(index: int, test_case: TestCase) -> tuple[int, TestRecord]:
+        nonlocal completed
+        async with semaphore:
+            started_at = _now_iso()
+            record = await run_test_case(test_case, rag_assistant, tool_agent, guardrails_enabled)
+            record.started_at = started_at
+            record.completed_at = _now_iso()
+        completed += 1
         if on_record:
-            on_record(i, len(test_cases), record)
-    return records
+            on_record(completed, total, record)
+        return index, record
+
+    results = await asyncio.gather(
+        *(run_one(i, tc) for i, tc in enumerate(test_cases)), return_exceptions=True
+    )
+
+    ok = [r for r in results if not isinstance(r, BaseException)]
+    ok.sort(key=lambda pair: pair[0])  # stable order by original test-case index, not completion
+
+    errors = [r for r in results if isinstance(r, BaseException)]
+    if errors:
+        raise errors[0]
+    return [record for _, record in ok]
 
 
 def summarize(records: list[TestRecord], guardrails_enabled: bool = False) -> RunSummary:

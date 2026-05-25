@@ -237,7 +237,7 @@ class Harness:
         async def ready():
             return None
 
-        async def fake_run_tests(test_cases, guardrails_enabled, on_record=None):
+        async def fake_run_tests(test_cases, guardrails_enabled, on_record=None, concurrency=1):
             seed = ollama_client.default_options["seed"]
             self.calls.append((seed, guardrails_enabled))
             self.seen_options.append(dict(ollama_client.default_options))

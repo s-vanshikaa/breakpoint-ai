@@ -136,7 +136,7 @@ class TestExecuteRun:
         async def ready():
             return None
 
-        async def fake_run_tests(test_cases, guardrails_enabled, on_record=None):
+        async def fake_run_tests(test_cases, guardrails_enabled, on_record=None, concurrency=1):
             passed = GUARDED_PASS if guardrails_enabled else BASELINE_PASS
             out = records(guardrails_enabled, passed)
             for i, r in enumerate(out, start=1):

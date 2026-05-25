@@ -27,6 +27,37 @@ class OllamaClient:
         self.timeout = timeout or settings.ollama_timeout_seconds
         # Applied to every request (e.g. {"seed": 42}); per-call options take precedence.
         self.default_options: dict = {}
+        # Set by open()/__aenter__ for the lifetime of a benchmark run, so every request
+        # shares one connection pool instead of opening a fresh TCP/TLS handshake each time.
+        # None (the default) falls back to a short-lived client per call, as before.
+        self._client: httpx.AsyncClient | None = None
+
+    async def open(self) -> None:
+        """Starts a pooled client shared by every request until aclose() is called."""
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=self.timeout)
+
+    async def aclose(self) -> None:
+        """Closes the pooled client, if one is open. Safe to call more than once."""
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+    async def __aenter__(self) -> "OllamaClient":
+        await self.open()
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        await self.aclose()
+
+    async def _request(self, method: str, url: str, *, timeout: float | None = None, **kwargs):
+        """Uses the pooled client if open() was called, otherwise a one-off client."""
+        if self._client is not None:
+            if timeout is not None:
+                kwargs["timeout"] = timeout
+            return await self._client.request(method, url, **kwargs)
+        async with httpx.AsyncClient(timeout=timeout or self.timeout) as client:
+            return await client.request(method, url, **kwargs)
 
     def _unavailable(self) -> OllamaUnavailableError:
         return OllamaUnavailableError(
@@ -43,10 +74,9 @@ class OllamaClient:
     async def check_ready(self) -> None:
         """Raises an OllamaError if the server is down or the model is not pulled."""
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(f"{self.host}/api/tags")
-                response.raise_for_status()
-                installed = {m["name"] for m in response.json().get("models", [])}
+            response = await self._request("get", f"{self.host}/api/tags", timeout=10.0)
+            response.raise_for_status()
+            installed = {m["name"] for m in response.json().get("models", [])}
         except (httpx.ConnectError, httpx.TimeoutException) as e:
             raise self._unavailable() from e
         except (httpx.HTTPError, ValueError, KeyError) as e:
@@ -74,10 +104,9 @@ class OllamaClient:
             payload["options"] = merged_options
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(f"{self.host}/api/generate", json=payload)
-                response.raise_for_status()
-                return response.json()["response"]
+            response = await self._request("post", f"{self.host}/api/generate", json=payload)
+            response.raise_for_status()
+            return response.json()["response"]
         except httpx.ConnectError as e:
             raise self._unavailable() from e
         except httpx.TimeoutException as e:

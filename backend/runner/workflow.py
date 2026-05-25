@@ -9,7 +9,7 @@ from models.ollama_client import ollama_client
 from runner.common import ResultsError, ensure_ollama_ready
 from runner.comparison import ComparisonReport, compute_comparison
 from runner.metrics import BaselineMetrics, compute_baseline_metrics
-from runner.runner import run_tests
+from runner.runner import DEFAULT_CONCURRENCY, run_tests
 from runner.schema import TestRecord
 
 RUN_NAMES = ("baseline", "guarded")
@@ -48,7 +48,11 @@ def print_progress(index: int, total: int, record: TestRecord) -> None:
 
 
 async def execute_run(
-    name: str, test_cases: list[TestCase], results_dir: Path, seed: int | None = None
+    name: str,
+    test_cases: list[TestCase],
+    results_dir: Path,
+    seed: int | None = None,
+    concurrency: int = DEFAULT_CONCURRENCY,
 ) -> StoredRun:
     """Runs the benchmark with guardrails off ('baseline') or on ('guarded') and saves it."""
     if name not in RUN_NAMES:
@@ -62,14 +66,18 @@ async def execute_run(
     print(
         f"Running {name} benchmark: {len(test_cases)} cases, "
         f"guardrails {'ON' if guardrails_enabled else 'OFF'}, "
-        f"model {ollama_client.model}, seed {seed_text}"
+        f"model {ollama_client.model}, seed {seed_text}, concurrency {concurrency}"
     )
-    records = await run_tests(test_cases, guardrails_enabled, on_record=print_progress)
+    async with ollama_client:  # one pooled HTTP client for every request in this run
+        records = await run_tests(
+            test_cases, guardrails_enabled, on_record=print_progress, concurrency=concurrency
+        )
     metrics = compute_baseline_metrics(records, test_cases, guardrails_enabled=guardrails_enabled)
     meta = {
         "run": name,
         "model": ollama_client.model,
         "seed": seed,
+        "concurrency": concurrency,
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
 

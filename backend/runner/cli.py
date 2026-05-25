@@ -20,7 +20,7 @@ from config import settings
 from models.ollama_client import ollama_client
 from runner import experiment, report, workflow
 from runner.common import ensure_ollama_ready, run_cli
-from runner.runner import run_tests, summarize
+from runner.runner import DEFAULT_CONCURRENCY, run_tests, summarize
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -48,6 +48,17 @@ def build_parser() -> argparse.ArgumentParser:
             ),
         )
 
+    def add_concurrency(p: argparse.ArgumentParser) -> None:
+        p.add_argument(
+            "--concurrency",
+            type=int,
+            default=DEFAULT_CONCURRENCY,
+            help=(
+                "Maximum number of model requests in flight at once "
+                f"(default: {DEFAULT_CONCURRENCY}, i.e. sequential)."
+            ),
+        )
+
     sub.add_parser("validate", help="Validate the benchmark dataset (no LLM needed).")
 
     for name, help_text in (
@@ -58,6 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
         p = sub.add_parser(name, help=help_text)
         add_seed(p)
         add_results_dir(p)
+        add_concurrency(p)
 
     p = sub.add_parser(
         "compare", help="Compare saved baseline/guarded runs and save comparison.json."
@@ -86,6 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=f"Where experiments are written (default: {settings.experiments_dir}).",
     )
+    add_concurrency(p)
 
     p = sub.add_parser("run", help="Ad hoc run of one test or one category; nothing is saved.")
     p.add_argument("--test-id", help="Run a single test case by ID.")
@@ -93,6 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--guardrails", action="store_true", help="Enable guardrails.")
     p.add_argument("--output", type=Path, help="Optional path to save the raw records as JSON.")
     add_seed(p)
+    add_concurrency(p)
     return parser
 
 
@@ -112,7 +126,9 @@ async def _cmd_run_benchmark(names: list[str], args: argparse.Namespace) -> None
     test_cases = load_test_cases()
     results_dir = args.results_dir or settings.results_dir
     for name in names:
-        stored = await workflow.execute_run(name, test_cases, results_dir, seed=args.seed)
+        stored = await workflow.execute_run(
+            name, test_cases, results_dir, seed=args.seed, concurrency=args.concurrency
+        )
         print()
         print(report.format_run_report(name, stored.metrics, stored.records, stored.meta))
         print()
@@ -131,6 +147,7 @@ async def _cmd_experiment(args: argparse.Namespace) -> None:
         args.seeds,
         args.experiments_dir or settings.experiments_dir,
         experiment_id=args.experiment_id,
+        concurrency=args.concurrency,
     )
     print()
     print(report.format_experiment_report(aggregate))
@@ -148,7 +165,10 @@ async def _cmd_run_adhoc(args: argparse.Namespace) -> None:
     await ensure_ollama_ready()
     ollama_client.default_options = {"seed": args.seed} if args.seed is not None else {}
     print(f"Running {len(cases)} test case(s) (guardrails_enabled={args.guardrails})...")
-    records = await run_tests(cases, args.guardrails, on_record=workflow.print_progress)
+    async with ollama_client:
+        records = await run_tests(
+            cases, args.guardrails, on_record=workflow.print_progress, concurrency=args.concurrency
+        )
     summary = summarize(records, guardrails_enabled=args.guardrails)
 
     print(

@@ -26,7 +26,7 @@ from models.ollama_client import OllamaError, ollama_client
 from runner.aggregate import CONFIGS, GUARDED, ExperimentAggregate, Trial, aggregate_experiment
 from runner.common import ResultsError, ensure_ollama_ready
 from runner.metrics import compute_baseline_metrics
-from runner.runner import run_tests
+from runner.runner import DEFAULT_CONCURRENCY, run_tests
 from runner.schema import TestRecord
 from runner.workflow import print_progress, write_json
 
@@ -70,6 +70,7 @@ class Manifest(BaseModel):
     seeds: list[int]
     test_case_count: int
     dataset_sha256: str  # hash of the test cases as loaded, in run order
+    concurrency: int = DEFAULT_CONCURRENCY
     determinism_note: str = DETERMINISM_NOTE
     trials: list[TrialEntry] = []
 
@@ -129,6 +130,7 @@ def _write_trial(
     error: str | None,
     started_at: str,
     completed_at: str,
+    concurrency: int,
 ) -> None:
     data: dict = {
         "meta": {
@@ -136,6 +138,7 @@ def _write_trial(
             "run": config,
             "seed": seed,
             "model": ollama_client.model,
+            "concurrency": concurrency,
             "started_at": started_at,
             "completed_at": completed_at,
         },
@@ -157,6 +160,7 @@ async def run_experiment(
     experiments_dir: Path,
     experiment_id: str | None = None,
     on_record: Callable[[int, int, TestRecord], None] | None = print_progress,
+    concurrency: int = DEFAULT_CONCURRENCY,
 ) -> tuple[Manifest, ExperimentAggregate]:
     """Runs baseline and guarded for every seed and persists trials, manifest and aggregate.
 
@@ -186,6 +190,7 @@ async def run_experiment(
         seeds=seeds,
         test_case_count=len(test_cases),
         dataset_sha256=dataset_fingerprint(test_cases),
+        concurrency=concurrency,
     )
     manifest_path = root / MANIFEST_FILENAME
     write_json(manifest_path, manifest.model_dump())
@@ -194,52 +199,56 @@ async def run_experiment(
     print(
         f"Experiment {experiment_id}: {len(test_cases)} cases x {len(CONFIGS)} configs "
         f"x {len(seeds)} seeds = {len(test_cases) * len(planned)} evaluations, "
-        f"model {ollama_client.model}"
+        f"model {ollama_client.model}, concurrency {concurrency}"
     )
 
     trials: list[Trial] = []
     previous_options = ollama_client.default_options
     try:
-        for n, (seed, config) in enumerate(planned, start=1):
-            print(f"\n[trial {n}/{len(planned)}] {config}, seed {seed}")
-            random.seed(seed)
-            ollama_client.default_options = {"seed": seed}
-            started_at = _now()
-            records: list[TestRecord] = []
-            error: str | None = None
-            try:
-                records = await run_tests(test_cases, config == GUARDED, on_record=on_record)
-            except OllamaError as e:
-                error = str(e)
-                print(f"  trial failed: {error}")
-            completed_at = _now()
+        async with ollama_client:  # one pooled HTTP client for every trial in this experiment
+            for n, (seed, config) in enumerate(planned, start=1):
+                print(f"\n[trial {n}/{len(planned)}] {config}, seed {seed}")
+                random.seed(seed)
+                ollama_client.default_options = {"seed": seed}
+                started_at = _now()
+                records: list[TestRecord] = []
+                error: str | None = None
+                try:
+                    records = await run_tests(
+                        test_cases, config == GUARDED, on_record=on_record, concurrency=concurrency
+                    )
+                except OllamaError as e:
+                    error = str(e)
+                    print(f"  trial failed: {error}")
+                completed_at = _now()
 
-            filename = trial_filename(config, seed)
-            _write_trial(
-                root / TRIALS_DIRNAME / filename,
-                experiment_id, config, seed, test_cases, records, error, started_at, completed_at,
-            )
-            trials.append(
-                Trial(
-                    config=config,
-                    seed=seed,
-                    status="failed" if error else "completed",
-                    error=error,
-                    records=records,
+                filename = trial_filename(config, seed)
+                _write_trial(
+                    root / TRIALS_DIRNAME / filename,
+                    experiment_id, config, seed, test_cases, records, error,
+                    started_at, completed_at, concurrency,
                 )
-            )
-            manifest.trials.append(
-                TrialEntry(
-                    config=config,
-                    seed=seed,
-                    status="failed" if error else "completed",
-                    file=f"{TRIALS_DIRNAME}/{filename}",
-                    error=error,
-                    started_at=started_at,
-                    completed_at=completed_at,
+                trials.append(
+                    Trial(
+                        config=config,
+                        seed=seed,
+                        status="failed" if error else "completed",
+                        error=error,
+                        records=records,
+                    )
                 )
-            )
-            write_json(manifest_path, manifest.model_dump())
+                manifest.trials.append(
+                    TrialEntry(
+                        config=config,
+                        seed=seed,
+                        status="failed" if error else "completed",
+                        file=f"{TRIALS_DIRNAME}/{filename}",
+                        error=error,
+                        started_at=started_at,
+                        completed_at=completed_at,
+                    )
+                )
+                write_json(manifest_path, manifest.model_dump())
     finally:
         ollama_client.default_options = previous_options
 
