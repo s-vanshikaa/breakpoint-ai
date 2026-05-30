@@ -2,12 +2,21 @@
 
 Layout written under <experiments_dir>/<experiment-id>/:
 
-    manifest.json                 what was run, on what, and the status of every trial
-    trials/<config>-seed-<n>.json one file per trial (full records, never only averages)
-    aggregate.json                cross-trial metrics (see runner.aggregate)
+    manifest.json                          what was run, on what, and the status of every trial
+    trials/<config>-seed-<n>.json          one file per finished trial (full records, never
+                                            only averages)
+    trials/<config>-seed-<n>.checkpoint.jsonl   completed evaluations for a trial still in
+                                            progress (or interrupted); removed once the trial
+                                            finishes
+    aggregate.json                         cross-trial metrics (see runner.aggregate)
 
 Every file is written atomically, and the manifest is rewritten after each trial, so an
-interrupted experiment leaves a valid manifest describing what finished.
+interrupted experiment leaves a valid manifest describing what finished. Within a trial, every
+evaluation is additionally checkpointed as it completes (see runner.checkpoint), so a crash
+mid-trial loses at most the one evaluation that was in flight, not the whole trial. Use
+resume_experiment() to pick an interrupted experiment back up: it skips trials already marked
+"completed" in the manifest and, for any other planned trial, resumes from its checkpoint
+instead of re-running cases that already finished.
 """
 
 import hashlib
@@ -22,7 +31,8 @@ from pydantic import BaseModel, ValidationError
 
 from attacks.schema import TestCase
 from config import REPO_ROOT
-from models.ollama_client import OllamaError, ollama_client
+from models.ollama_client import benchmark_session, ollama_client
+from runner import checkpoint
 from runner.aggregate import CONFIGS, GUARDED, ExperimentAggregate, Trial, aggregate_experiment
 from runner.common import ResultsError, ensure_ollama_ready
 from runner.metrics import compute_baseline_metrics
@@ -131,6 +141,7 @@ def _write_trial(
     started_at: str,
     completed_at: str,
     concurrency: int,
+    status: str,
 ) -> None:
     data: dict = {
         "meta": {
@@ -142,16 +153,100 @@ def _write_trial(
             "started_at": started_at,
             "completed_at": completed_at,
         },
-        "status": "failed" if error else "completed",
+        "status": status,
         "error": error,
         "records": [r.model_dump() for r in records],
     }
-    if not error:
+    if status == "completed":
         metrics = compute_baseline_metrics(
             records, test_cases, guardrails_enabled=config == GUARDED
         )
         data["metrics"] = metrics.model_dump()
     write_json(path, data)
+
+
+async def _run_trial(
+    test_cases: list[TestCase],
+    config: str,
+    seed: int,
+    trials_dir: Path,
+    experiment_id: str,
+    concurrency: int,
+    on_record: Callable[[int, int, TestRecord], None] | None,
+) -> tuple[Trial, TrialEntry]:
+    """Runs one trial to completion, resuming from its checkpoint if one exists.
+
+    Every completed evaluation is appended to the trial's checkpoint file as it finishes. If
+    `test_cases` includes IDs already present in the checkpoint (a previous attempt got partway
+    through), those are skipped and only the remaining cases are run — so calling this twice for
+    the same trial never produces duplicate evaluations. The final consolidated trial file is
+    always written (even on failure, so the manifest's `file` reference is always valid); the
+    checkpoint is only cleared once every case has a result.
+    """
+    ckpt_path = checkpoint.checkpoint_path(trials_dir, config, seed)
+    done_records = checkpoint.load_records(ckpt_path)
+    done_ids = {r.test_id for r in done_records}
+    remaining = [tc for tc in test_cases if tc.id not in done_ids]
+    if done_records:
+        print(f"  resuming: {len(done_records)}/{len(test_cases)} cases already checkpointed")
+
+    def record_and_checkpoint(i: int, total: int, record: TestRecord) -> None:
+        checkpoint.append_record(ckpt_path, record)
+        if on_record:
+            on_record(i, total, record)
+
+    started_at = _now()
+    error: str | None = None
+    new_records: list[TestRecord] = []
+    if remaining:
+        random.seed(seed)
+        ollama_client.default_options = {"seed": seed}
+        try:
+            new_records = await run_tests(
+                remaining, config == GUARDED, on_record=record_and_checkpoint,
+                concurrency=concurrency,
+            )
+        except Exception as e:  # a genuinely unexpected bug; isolate it to this trial
+            error = str(e)
+            print(f"  trial failed: {error}")
+    completed_at = _now()
+
+    by_id = {r.test_id: r for r in (*done_records, *new_records)}
+    records = [by_id[tc.id] for tc in test_cases if tc.id in by_id]  # original dataset order
+    status = "completed" if error is None and len(records) == len(test_cases) else "failed"
+
+    filename = trial_filename(config, seed)
+    _write_trial(
+        trials_dir / filename, experiment_id, config, seed, test_cases, records, error,
+        started_at, completed_at, concurrency, status,
+    )
+    if status == "completed":
+        checkpoint.clear(ckpt_path)  # nothing left to resume
+
+    trial = Trial(config=config, seed=seed, status=status, error=error, records=records)
+    entry = TrialEntry(
+        config=config, seed=seed, status=status, file=f"{TRIALS_DIRNAME}/{filename}",
+        error=error, started_at=started_at, completed_at=completed_at,
+    )
+    return trial, entry
+
+
+def _finalize(
+    manifest: Manifest,
+    manifest_path: Path,
+    root: Path,
+    experiment_id: str,
+    trials: list[Trial],
+    test_cases: list[TestCase],
+    planned_count: int,
+) -> tuple[Manifest, ExperimentAggregate]:
+    aggregate = aggregate_experiment(experiment_id, trials, test_cases, planned=planned_count)
+    write_json(root / AGGREGATE_FILENAME, aggregate.model_dump())
+    manifest.status = "complete" if not aggregate.trials_failed else "partial"
+    manifest.completed_at = _now()
+    write_json(manifest_path, manifest.model_dump())
+    print(f"\nSaved experiment to {root}")
+    return manifest, aggregate
 
 
 async def run_experiment(
@@ -161,10 +256,13 @@ async def run_experiment(
     experiment_id: str | None = None,
     on_record: Callable[[int, int, TestRecord], None] | None = print_progress,
     concurrency: int = DEFAULT_CONCURRENCY,
+    timeout: float | None = None,
+    max_retries: int | None = None,
 ) -> tuple[Manifest, ExperimentAggregate]:
     """Runs baseline and guarded for every seed and persists trials, manifest and aggregate.
 
-    A trial whose model calls fail is recorded as failed and the remaining trials still run.
+    A trial whose model calls fail after retries are exhausted is recorded per-case as a failed
+    evaluation (see runner.runner.run_test_case), not aborted; the remaining trials still run.
     """
     if not test_cases:
         raise ExperimentError("The dataset has no test cases.")
@@ -205,60 +303,101 @@ async def run_experiment(
     trials: list[Trial] = []
     previous_options = ollama_client.default_options
     try:
-        async with ollama_client:  # one pooled HTTP client for every trial in this experiment
+        async with benchmark_session(ollama_client, timeout=timeout, max_retries=max_retries):
             for n, (seed, config) in enumerate(planned, start=1):
                 print(f"\n[trial {n}/{len(planned)}] {config}, seed {seed}")
-                random.seed(seed)
-                ollama_client.default_options = {"seed": seed}
-                started_at = _now()
-                records: list[TestRecord] = []
-                error: str | None = None
-                try:
-                    records = await run_tests(
-                        test_cases, config == GUARDED, on_record=on_record, concurrency=concurrency
-                    )
-                except OllamaError as e:
-                    error = str(e)
-                    print(f"  trial failed: {error}")
-                completed_at = _now()
-
-                filename = trial_filename(config, seed)
-                _write_trial(
-                    root / TRIALS_DIRNAME / filename,
-                    experiment_id, config, seed, test_cases, records, error,
-                    started_at, completed_at, concurrency,
+                trial, entry = await _run_trial(
+                    test_cases, config, seed, root / TRIALS_DIRNAME, experiment_id,
+                    concurrency, on_record,
                 )
-                trials.append(
-                    Trial(
-                        config=config,
-                        seed=seed,
-                        status="failed" if error else "completed",
-                        error=error,
-                        records=records,
-                    )
-                )
-                manifest.trials.append(
-                    TrialEntry(
-                        config=config,
-                        seed=seed,
-                        status="failed" if error else "completed",
-                        file=f"{TRIALS_DIRNAME}/{filename}",
-                        error=error,
-                        started_at=started_at,
-                        completed_at=completed_at,
-                    )
-                )
+                trials.append(trial)
+                manifest.trials.append(entry)
                 write_json(manifest_path, manifest.model_dump())
     finally:
         ollama_client.default_options = previous_options
 
-    aggregate = aggregate_experiment(experiment_id, trials, test_cases, planned=len(planned))
-    write_json(root / AGGREGATE_FILENAME, aggregate.model_dump())
-    manifest.status = "complete" if not aggregate.trials_failed else "partial"
-    manifest.completed_at = _now()
+    return _finalize(manifest, manifest_path, root, experiment_id, trials, test_cases, len(planned))
+
+
+async def resume_experiment(
+    test_cases: list[TestCase],
+    experiments_dir: Path,
+    experiment_id: str,
+    on_record: Callable[[int, int, TestRecord], None] | None = print_progress,
+    timeout: float | None = None,
+    max_retries: int | None = None,
+) -> tuple[Manifest, ExperimentAggregate]:
+    """Resumes an experiment by ID: reuses its original seeds, configurations and concurrency
+    from the manifest (they are not re-taken from the caller, so a resumed run can't silently
+    diverge from what was originally planned), skips trials already marked "completed", and for
+    every other planned trial, resumes from its checkpoint (or starts it if it never began).
+
+    `timeout`/`max_retries` may still be overridden on resume: they only affect how robustly a
+    request is retried, not what's being evaluated, so they aren't part of the experiment's
+    fixed configuration the way seeds/concurrency are.
+    """
+    root = experiments_dir / experiment_id
+    manifest_path = root / MANIFEST_FILENAME
+    if not manifest_path.is_file():
+        raise ExperimentError(f"No experiment found at {root} (missing {MANIFEST_FILENAME}).")
+    try:
+        manifest = Manifest.model_validate_json(manifest_path.read_text())
+    except (ValidationError, ValueError) as e:
+        raise ExperimentError(f"{manifest_path} is malformed ({e}).") from e
+
+    fingerprint = dataset_fingerprint(test_cases)
+    if fingerprint != manifest.dataset_sha256:
+        raise ExperimentError(
+            f"The current dataset doesn't match experiment {experiment_id}'s original dataset "
+            f"({fingerprint[:12]} vs {manifest.dataset_sha256[:12]}); refusing to resume with "
+            "different test cases. Start a new experiment instead."
+        )
+
+    await ensure_ollama_ready()
+
+    completed_entries = {(e.config, e.seed): e for e in manifest.trials if e.status == "completed"}
+    planned = [(seed, config) for seed in manifest.seeds for config in manifest.configurations]
+    print(
+        f"Resuming experiment {experiment_id}: {len(planned)} planned trials, "
+        f"{len(completed_entries)} already completed, concurrency {manifest.concurrency}"
+    )
+
+    trials: list[Trial] = []
+    resumed_entries: dict[tuple[str, int], TrialEntry] = {}
+    previous_options = ollama_client.default_options
+    try:
+        async with benchmark_session(ollama_client, timeout=timeout, max_retries=max_retries):
+            for n, (seed, config) in enumerate(planned, start=1):
+                key = (config, seed)
+                if key in completed_entries:
+                    entry = completed_entries[key]
+                    print(f"\n[trial {n}/{len(planned)}] {config}, seed {seed}: already complete")
+                    data = json.loads((root / entry.file).read_text())
+                    trials.append(
+                        Trial(config=config, seed=seed, status="completed", records=data["records"])
+                    )
+                    continue
+
+                print(f"\n[trial {n}/{len(planned)}] {config}, seed {seed}: resuming")
+                trial, entry = await _run_trial(
+                    test_cases, config, seed, root / TRIALS_DIRNAME, experiment_id,
+                    manifest.concurrency, on_record,
+                )
+                trials.append(trial)
+                resumed_entries[key] = entry
+    finally:
+        ollama_client.default_options = previous_options
+
+    # Rebuild manifest.trials in the original planned order: completed entries are kept
+    # untouched, everything else is replaced by what this resume just produced.
+    manifest.trials = [
+        completed_entries[(config, seed)] if (config, seed) in completed_entries
+        else resumed_entries[(config, seed)]
+        for seed, config in planned
+    ]
     write_json(manifest_path, manifest.model_dump())
-    print(f"\nSaved experiment to {root}")
-    return manifest, aggregate
+
+    return _finalize(manifest, manifest_path, root, experiment_id, trials, test_cases, len(planned))
 
 
 def load_experiment(root: Path) -> tuple[Manifest, list[Trial]]:

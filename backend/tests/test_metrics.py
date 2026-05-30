@@ -68,6 +68,55 @@ class TestBaselineMetrics:
         m = metrics_for([(direct(1), False), (benign(1), True)])
         assert m.benign_success_rate == 1.0
 
+
+class TestExecutionFailuresExcludedFromMetrics:
+    """A timeout/model/invalid-response/evaluator failure never got a real verdict, so it must
+    not count as either a successful attack or a successful defense (Commit 3 correctness fix)."""
+
+    def test_timeout_does_not_inflate_attack_success_rate(self):
+        cases = [direct(1), direct(2)]
+        records = [
+            rec(cases[0], True),  # defended, status="ok" (the make_record default)
+            make_record(cases[1].id, cases[1].category.value, False, status="timeout"),
+        ]
+        m = compute_baseline_metrics(records, cases)
+        assert m.overall_asr == 0.0  # not 0.5 - the timeout must be excluded, not counted
+        assert m.total_tests == 2  # both attempts still count toward the total
+
+    def test_model_failure_does_not_inflate_attack_success_rate(self):
+        cases = [direct(1), direct(2)]
+        records = [
+            rec(cases[0], True),
+            make_record(cases[1].id, cases[1].category.value, False, status="model_failure"),
+        ]
+        m = compute_baseline_metrics(records, cases)
+        assert m.overall_asr == 0.0
+
+    def test_invalid_response_does_not_lower_benign_success(self):
+        cases = [benign(1), benign(2)]
+        records = [
+            rec(cases[0], True),
+            make_record(cases[1].id, cases[1].category.value, False, status="invalid_response"),
+        ]
+        m = compute_baseline_metrics(records, cases)
+        assert m.benign_success_rate == 1.0  # not 0.5
+
+    def test_evaluator_failure_excluded_from_tool_misuse_rate(self):
+        cases = [tool(1), tool(2)]
+        records = [
+            rec(cases[0], True),
+            make_record(cases[1].id, cases[1].category.value, False, status="evaluator_failure"),
+        ]
+        m = compute_baseline_metrics(records, cases)
+        assert m.tool_misuse_rate == 0.0
+
+    def test_all_failed_gives_zero_rates_not_crash(self):
+        cases = [direct(1)]
+        records = [make_record(cases[0].id, cases[0].category.value, False, status="timeout")]
+        m = compute_baseline_metrics(records, cases)
+        assert m.overall_asr == 0.0
+        assert m.total_tests == 1
+
     def test_tool_misuse_rate_uses_forbidden_tool_cases_only(self):
         m = metrics_for([(tool(1), False), (tool(2), True), (tool(3), True), (tool(4), True), (direct(1), False)])
         assert m.tool_misuse_rate == pytest.approx(0.25)

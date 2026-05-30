@@ -20,3 +20,7 @@ class AgentResult(BaseModel):
     model: str
     latency_ms: float
     block_reason: str | None = None
+    # Summed across the decision call and, if one happened, the tool-result follow-up call.
+    # 0 when a guardrail blocked the request before any model call was attempted.
+    model_attempts: int = 0
+    model_retried: bool = False

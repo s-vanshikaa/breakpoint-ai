@@ -7,7 +7,7 @@ import pytest
 from attacks.schema import AttackCategory, TargetApp
 from models.ollama_client import OllamaError, ollama_client
 from runner import aggregate as agg
-from runner import cli, experiment, report
+from runner import checkpoint, cli, experiment, report
 from runner.common import ResultsError
 from tests.conftest import make_case, make_record
 
@@ -100,7 +100,7 @@ class TestAggregate:
         result = aggregate(trials())
         assert result.total_evaluations == 5 * 2 * 2  # cases x trials x configs
         assert result.trials_completed == 4 and result.trials_failed == 0
-        assert result.configs["baseline"].evaluations == 10
+        assert result.configs["baseline"].total_evaluations == 10
 
         three_seeds = aggregate(
             [
@@ -224,6 +224,153 @@ class TestAggregate:
         random.Random(0).shuffle(shuffled)
         assert aggregate(ordered).model_dump() == aggregate(shuffled).model_dump()
         assert list(aggregate(shuffled).configs) == ["baseline", "guarded"]
+
+
+def both_configs(records, cases):
+    """An experiment with one trial per config, both using the same records/cases - handy when
+    a test only cares about one config's aggregate."""
+    return agg.aggregate_experiment(
+        "exp",
+        [agg.Trial(config="baseline", seed=1, records=records),
+         agg.Trial(config="guarded", seed=1, records=records)],
+        cases,
+    )  # fmt: skip
+
+
+class TestExecutionFailuresExcludedFromOutcomeMetrics:
+    """A timeout/model/invalid-response/evaluator failure never produced a real verdict, so
+    outcome metrics (ASR, tool misuse, benign success) must count only status == "ok" records,
+    with failures surfaced separately rather than folded into the pass/fail rate."""
+
+    def test_timeouts_do_not_affect_attack_success_rate(self):
+        # A naive passed-only count would treat the timed-out case (passed=False by convention)
+        # as an attack success, inflating ASR from 0.0 to 0.5. It must be excluded entirely.
+        records = [
+            make_record("direct_1", "direct_injection", True, status="ok"),  # defended
+            make_record("direct_2", "direct_injection", False, status="timeout"),
+        ]
+        result = both_configs(records, [make_case(id="direct_1"), make_case(id="direct_2")])
+        asr = result.configs["baseline"].asr
+        assert (asr.numerator, asr.denominator) == (0, 1)
+        assert asr.pooled == 0.0
+
+    def test_model_failures_do_not_affect_attack_success_rate(self):
+        records = [
+            make_record("direct_1", "direct_injection", True, status="ok"),
+            make_record("direct_2", "direct_injection", False, status="model_failure"),
+        ]
+        result = both_configs(records, [make_case(id="direct_1"), make_case(id="direct_2")])
+        asr = result.configs["baseline"].asr
+        assert (asr.numerator, asr.denominator) == (0, 1)
+        assert asr.pooled == 0.0
+
+    def test_invalid_response_and_evaluator_failure_are_also_excluded_from_asr(self):
+        records = [
+            make_record("direct_1", "direct_injection", True, status="ok"),
+            make_record("direct_2", "direct_injection", False, status="invalid_response"),
+            make_record("direct_3", "direct_injection", False, status="evaluator_failure"),
+        ]
+        cases = [make_case(id=f"direct_{i}") for i in (1, 2, 3)]
+        result = both_configs(records, cases)
+        asr = result.configs["baseline"].asr
+        assert (asr.numerator, asr.denominator) == (0, 1)
+
+    def test_failures_do_not_lower_benign_success_rate(self):
+        records = [
+            make_record("benign_1", "benign", True, status="ok"),
+            make_record("benign_2", "benign", False, status="invalid_response"),
+        ]
+        cases = [
+            make_case(
+                id=f"benign_{i}", category=AttackCategory.benign, protected_value=None,
+                expected_keywords=["x"], expected="must_answer_correctly",
+            )
+            for i in (1, 2)
+        ]  # fmt: skip
+        result = both_configs(records, cases)
+        rate = result.configs["baseline"].benign_success_rate
+        assert (rate.numerator, rate.denominator) == (1, 1)
+        assert rate.pooled == 1.0  # not 0.5
+
+    def test_failure_counts_are_surfaced_explicitly(self):
+        records = [
+            make_record("direct_1", "direct_injection", True, status="ok"),
+            make_record("direct_2", "direct_injection", False, status="timeout"),
+            make_record("secret_1", "secret_extraction", False, status="model_failure"),
+            make_record("tool_1", "tool_misuse", False, status="invalid_response"),
+            make_record("benign_1", "benign", False, status="evaluator_failure"),
+        ]
+        cases = [
+            make_case(id="direct_1"),
+            make_case(id="direct_2"),
+            make_case(id="secret_1", category=AttackCategory.secret_extraction),
+            make_case(
+                id="tool_1", category=AttackCategory.tool_misuse, target=TargetApp.tool_agent,
+                protected_value=None, forbidden_tool="delete_user",
+            ),
+            make_case(
+                id="benign_1", category=AttackCategory.benign, protected_value=None,
+                expected_keywords=["x"], expected="must_answer_correctly",
+            ),
+        ]  # fmt: skip
+        result = both_configs(records, cases)
+        base = result.configs["baseline"]
+        assert base.total_evaluations == 5
+        assert base.valid_evaluations == 1
+        assert base.failed_evaluations == 4
+        assert base.valid_evaluation_rate == pytest.approx(0.2)
+        assert base.failures_by_status == {
+            "timeout": 1, "model_failure": 1, "invalid_response": 1, "evaluator_failure": 1,
+        }  # fmt: skip
+
+    def test_zero_valid_denominator_returns_null_not_zero(self):
+        records = [
+            make_record("direct_1", "direct_injection", False, status="timeout"),
+            make_record("direct_2", "direct_injection", False, status="model_failure"),
+        ]
+        result = both_configs(records, [make_case(id="direct_1"), make_case(id="direct_2")])
+        asr = result.configs["baseline"].asr
+        assert asr.numerator == 0 and asr.denominator == 0
+        assert asr.pooled is None
+        assert asr.mean is None
+        assert asr.std is None
+        # coverage itself is still a real number (0 of 2 were valid), never null
+        assert result.configs["baseline"].valid_evaluation_rate == 0.0
+        assert result.configs["baseline"].total_evaluations == 2
+
+    def test_reduction_uses_only_valid_records_even_when_counts_differ_between_configs(self):
+        baseline_records = [
+            make_record("direct_1", "direct_injection", False, status="ok"),  # attack succeeded
+            make_record("direct_2", "direct_injection", False, status="timeout"),  # excluded
+        ]
+        guarded_records = [
+            make_record("direct_1", "direct_injection", True, status="ok"),  # defended
+            make_record("direct_2", "direct_injection", True, status="ok"),  # defended
+        ]
+        result = agg.aggregate_experiment(
+            "exp",
+            [agg.Trial(config="baseline", seed=1, records=baseline_records),
+             agg.Trial(config="guarded", seed=1, records=guarded_records)],
+            [make_case(id="direct_1"), make_case(id="direct_2")],
+        )  # fmt: skip
+        assert result.configs["baseline"].asr.denominator == 1  # only direct_1 was gradeable
+        assert result.configs["guarded"].asr.denominator == 2  # no failures here
+        assert result.comparison.baseline_asr == 1.0
+        assert result.comparison.guarded_asr == 0.0
+        assert result.comparison.absolute_asr_reduction == 1.0
+        assert result.comparison.relative_asr_reduction == 1.0
+
+    def test_a_trial_where_everything_failed_contributes_no_outcome_signal(self):
+        records = [
+            make_record("direct_1", "direct_injection", False, status="timeout"),
+            make_record("direct_2", "direct_injection", False, status="timeout"),
+        ]
+        result = both_configs(records, [make_case(id="direct_1"), make_case(id="direct_2")])
+        base = result.configs["baseline"]
+        assert base.asr.pooled is None
+        assert base.valid_evaluations == 0
+        assert base.failed_evaluations == 2
+        assert base.failures_by_status["timeout"] == 2
 
 
 class Harness:
@@ -393,3 +540,163 @@ class TestCli:
 
     def test_seeds_default_to_five_trials(self):
         assert cli.build_parser().parse_args(["experiment"]).seeds == [1, 2, 3, 4, 5]
+
+    def test_resume_defaults_to_none(self):
+        assert cli.build_parser().parse_args(["experiment"]).resume is None
+
+    def test_max_retries_default_and_dest(self):
+        args = cli.build_parser().parse_args(["experiment", "--max-retries", "5"])
+        assert args.max_retries == 5
+
+
+class RecordingHarness:
+    """Like Harness, but calls on_record per case (so checkpointing is actually exercised) and
+    can be told to fail partway through a specific trial, after some cases already checkpointed.
+    """
+
+    def __init__(self, monkeypatch, crash_after: dict[tuple[int, bool], int] | None = None):
+        self.calls: list[tuple[int, bool, int]] = []  # (seed, guarded, len(test_cases))
+        self.received_concurrency: list[int] = []
+        self.crash_after = crash_after or {}
+
+        async def ready():
+            return None
+
+        async def fake_run_tests(test_cases, guardrails_enabled, on_record=None, concurrency=1):
+            seed = ollama_client.default_options["seed"]
+            self.calls.append((seed, guardrails_enabled, len(test_cases)))
+            self.received_concurrency.append(concurrency)
+            cutoff = self.crash_after.get((seed, guardrails_enabled))
+            produced = []
+            for i, tc in enumerate(test_cases, start=1):
+                if cutoff is not None and i > cutoff:
+                    raise OllamaError(f"crashed after {cutoff} cases")
+                failing = FAILS.get((seed, guardrails_enabled), set())
+                record = make_record(
+                    tc.id, tc.category.value, tc.id not in failing,
+                    guardrails_enabled=guardrails_enabled, latency_ms=1.0,
+                )
+                produced.append(record)
+                if on_record:
+                    on_record(i, len(test_cases), record)
+            return produced
+
+        monkeypatch.setattr(experiment, "ensure_ollama_ready", ready)
+        monkeypatch.setattr(experiment, "run_tests", fake_run_tests)
+        monkeypatch.setattr(experiment, "git_state", lambda: ("abc123", False))
+
+
+class TestCheckpointingAndResume:
+    def test_checkpoint_file_is_removed_once_a_trial_completes(self, tmp_path, monkeypatch):
+        RecordingHarness(monkeypatch)
+        run(tmp_path, seeds=(1,))
+        trials_dir = tmp_path / "exp-test" / "trials"
+        assert not list(trials_dir.glob("*.checkpoint.jsonl"))
+
+    def test_interrupted_trial_leaves_a_partial_checkpoint(self, tmp_path, monkeypatch):
+        RecordingHarness(monkeypatch, crash_after={(1, False): 2})
+        manifest, result = run(tmp_path, seeds=(1,))
+        trial_entry = next(t for t in manifest.trials if t.config == "baseline" and t.seed == 1)
+        assert trial_entry.status == "failed"
+        ckpt = tmp_path / "exp-test" / "trials" / "baseline-seed-1.checkpoint.jsonl"
+        assert [r.test_id for r in checkpoint.load_records(ckpt)] == [
+            c.id for c in dataset()[:2]
+        ]
+        # the other three trials (guarded seed 1's included) still ran normally
+        assert result.trials_completed == 1 and result.trials_failed == 1
+
+    def test_resume_only_reruns_the_remaining_cases_of_an_interrupted_trial(
+        self, tmp_path, monkeypatch
+    ):
+        h = RecordingHarness(monkeypatch, crash_after={(1, False): 2})
+        run(tmp_path, seeds=(1,))
+        assert h.calls == [(1, False, 5), (1, True, 5)]  # baseline crashed, guarded finished
+
+        h2 = RecordingHarness(monkeypatch)  # no crashes this time
+        manifest, result = asyncio.run(
+            experiment.resume_experiment(dataset(), tmp_path, "exp-test", on_record=None)
+        )
+        # only the incomplete baseline/seed-1 trial was re-touched, and only for the 3
+        # cases that weren't already checkpointed
+        assert h2.calls == [(1, False, 3)]
+        assert manifest.status == "complete"
+        assert result.trials_completed == 2 and result.trials_failed == 0
+        assert result.total_evaluations == 10
+
+    def test_resume_produces_no_duplicate_records_in_original_order(self, tmp_path, monkeypatch):
+        RecordingHarness(monkeypatch, crash_after={(1, False): 2})
+        run(tmp_path, seeds=(1,))
+        RecordingHarness(monkeypatch)
+        asyncio.run(experiment.resume_experiment(dataset(), tmp_path, "exp-test", on_record=None))
+
+        trial = json.loads(
+            (tmp_path / "exp-test" / "trials" / "baseline-seed-1.json").read_text()
+        )
+        ids = [r["test_id"] for r in trial["records"]]
+        assert ids == [c.id for c in dataset()]  # original dataset order, exactly once each
+        assert len(ids) == len(set(ids))
+        assert trial["status"] == "completed"
+        ckpt = tmp_path / "exp-test" / "trials" / "baseline-seed-1.checkpoint.jsonl"
+        assert not ckpt.exists()  # cleared once the trial finished
+
+    def test_resume_skips_trials_already_marked_completed(self, tmp_path, monkeypatch):
+        RecordingHarness(monkeypatch)
+        run(tmp_path, seeds=(1, 2))  # everything completes on the first pass
+
+        h2 = RecordingHarness(monkeypatch)
+        manifest, result = asyncio.run(
+            experiment.resume_experiment(dataset(), tmp_path, "exp-test", on_record=None)
+        )
+        assert h2.calls == []  # nothing left to do
+        assert result.total_evaluations == 20
+        assert manifest.status == "complete"
+
+    def test_resume_a_trial_that_failed_with_zero_progress_reruns_it_fully(
+        self, tmp_path, monkeypatch
+    ):
+        RecordingHarness(monkeypatch, crash_after={(1, True): 0})
+        run(tmp_path, seeds=(1,))
+
+        h2 = RecordingHarness(monkeypatch)
+        manifest, result = asyncio.run(
+            experiment.resume_experiment(dataset(), tmp_path, "exp-test", on_record=None)
+        )
+        assert h2.calls == [(1, True, 5)]  # nothing had been checkpointed, so all 5 re-ran
+        assert result.trials_failed == 0
+
+    def test_resume_preserves_original_seeds_and_concurrency(self, tmp_path, monkeypatch):
+        h = RecordingHarness(monkeypatch, crash_after={(1, False): 1})
+        run(tmp_path, seeds=(1, 2), concurrency=3)
+        assert h.received_concurrency == [3, 3, 3, 3]  # all 4 trials ran at concurrency 3
+
+        h2 = RecordingHarness(monkeypatch)
+        manifest, _ = asyncio.run(
+            experiment.resume_experiment(dataset(), tmp_path, "exp-test", on_record=None)
+        )
+        assert manifest.seeds == [1, 2]  # unchanged, even though resume takes no --seeds
+        assert manifest.concurrency == 3
+        assert h2.received_concurrency == [3]  # the resumed trial also ran at the original value
+
+    def test_resume_rejects_a_changed_dataset(self, tmp_path, monkeypatch):
+        RecordingHarness(monkeypatch, crash_after={(1, False): 1})
+        run(tmp_path, seeds=(1,))
+
+        changed = [*dataset()[:-1], make_case(id="benign_1", prompt="a different prompt")]
+        with pytest.raises(experiment.ExperimentError, match="doesn't match"):
+            asyncio.run(experiment.resume_experiment(changed, tmp_path, "exp-test"))
+
+    def test_resume_missing_experiment_raises(self, tmp_path):
+        with pytest.raises(experiment.ExperimentError, match="No experiment found"):
+            asyncio.run(experiment.resume_experiment(dataset(), tmp_path, "does-not-exist"))
+
+    def test_resume_via_cli(self, tmp_path, monkeypatch, capsys):
+        RecordingHarness(monkeypatch, crash_after={(1, False): 2})
+        monkeypatch.setattr(cli, "load_test_cases", dataset)
+        cli.main(["experiment", "--seeds", "1", "--experiment-id", "e1",
+                   "--experiments-dir", str(tmp_path)])  # fmt: skip
+
+        RecordingHarness(monkeypatch)
+        cli.main(["experiment", "--resume", "e1", "--experiments-dir", str(tmp_path)])
+        out = capsys.readouterr().out
+        assert "Resuming experiment e1" in out
+        assert "2/2 trials completed" in out

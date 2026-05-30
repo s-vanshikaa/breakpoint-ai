@@ -6,6 +6,7 @@ import pytest
 from guardrails.input_guardrail import REFUSAL_MESSAGE, check_input
 from guardrails.retrieval_guardrail import filter_retrieved_chunks, strip_html_comments
 from guardrails.tool_permission_guardrail import check_tool_permission
+from models.retry import CompletionResult
 from targets.rag_assistant import assistant as rag_module
 from targets.rag_assistant.assistant import RAGAssistant
 from targets.rag_assistant.chunker import Chunk
@@ -121,6 +122,10 @@ class FakeLLM:
     async def complete(self, prompt, system=None, options=None):
         self.prompts.append(prompt)
         return self.replies.pop(0) if self.replies else "ok"
+
+    async def complete_with_retry(self, prompt, system=None, options=None, policy=None):
+        text = await self.complete(prompt, system=system, options=options)
+        return CompletionResult(text=text, attempts=1, retried=False)
 
 
 class FakeIndex:

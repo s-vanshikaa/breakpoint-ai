@@ -8,8 +8,13 @@ from models.ollama_client import (
     OllamaClient,
     OllamaError,
     OllamaModelNotFoundError,
+    OllamaResponseError,
+    OllamaTimeoutError,
     OllamaUnavailableError,
+    classify_error,
+    is_retryable,
 )
+from models.retry import RetryPolicy
 
 
 def use_transport(monkeypatch, handler):
@@ -234,3 +239,172 @@ class TestClientLifecycle:
 
         asyncio.run(go())
         assert len(built) == 1  # check_ready and complete shared the same pooled client
+
+
+def fast_policy(**overrides) -> RetryPolicy:
+    """A policy with no real jitter/delay, so retry tests don't sleep for real."""
+    fields = {"max_attempts": 3, "base_delay_seconds": 0.0, "max_delay_seconds": 0.0, "jitter_seconds": 0.0}
+    fields.update(overrides)
+    return RetryPolicy(**fields)
+
+
+def sequenced_handler(*responses):
+    """Returns each response/exception in `responses` in order, one per call."""
+    calls = iter(responses)
+
+    def handler(request):
+        item = next(calls)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    return handler
+
+
+class TestClassification:
+    def test_timeout_and_unavailable_are_retryable(self):
+        assert is_retryable(OllamaTimeoutError("x")) is True
+        assert is_retryable(OllamaUnavailableError("x")) is True
+
+    def test_model_missing_and_malformed_are_not_retryable(self):
+        assert is_retryable(OllamaModelNotFoundError("x")) is False
+        assert is_retryable(OllamaResponseError("x")) is False
+
+    def test_retryable_and_permanent_http_status_codes(self):
+        for code in (429, 500, 502, 503):
+            e = OllamaError("x")
+            e.status_code = code
+            assert is_retryable(e) is True, code
+        for code in (400, 401, 403):
+            e = OllamaError("x")
+            e.status_code = code
+            assert is_retryable(e) is False, code
+
+    def test_error_categories(self):
+        assert classify_error(OllamaTimeoutError("x")) == "timeout"
+        assert classify_error(OllamaResponseError("x")) == "invalid_response"
+        assert classify_error(OllamaUnavailableError("x")) == "model_failure"
+        assert classify_error(OllamaModelNotFoundError("x")) == "model_failure"
+
+
+class TestCompleteWithRetry:
+    def test_succeeds_on_the_first_try_without_delay(self, monkeypatch):
+        use_transport(monkeypatch, lambda r: httpx.Response(200, json={"response": "ok"}))
+        result = asyncio.run(client().complete_with_retry("hi", policy=fast_policy()))
+        assert result.text == "ok" and result.attempts == 1 and result.retried is False
+
+    def test_transient_failure_then_success_is_retried_and_reported(self, monkeypatch):
+        use_transport(
+            monkeypatch,
+            sequenced_handler(
+                httpx.Response(503, text="busy"),
+                httpx.Response(200, json={"response": "recovered"}),
+            ),
+        )
+        result = asyncio.run(client().complete_with_retry("hi", policy=fast_policy()))
+        assert result.text == "recovered"
+        assert result.attempts == 2
+        assert result.retried is True
+
+    def test_retries_are_capped_at_max_attempts(self, monkeypatch):
+        seen = {"n": 0}
+
+        def handler(request):
+            seen["n"] += 1
+            return httpx.Response(500, text="boom")
+
+        use_transport(monkeypatch, handler)
+        with pytest.raises(OllamaError, match="HTTP 500") as excinfo:
+            asyncio.run(client().complete_with_retry("hi", policy=fast_policy(max_attempts=3)))
+        assert seen["n"] == 3  # first attempt + 2 retries, then gave up
+        assert excinfo.value.attempts == 3
+        assert excinfo.value.retried is True
+
+    def test_permanent_failure_is_not_retried(self, monkeypatch):
+        seen = {"n": 0}
+
+        def handler(request):
+            seen["n"] += 1
+            return httpx.Response(404, json={"error": "not found"})
+
+        use_transport(monkeypatch, handler)
+        with pytest.raises(OllamaModelNotFoundError) as excinfo:
+            asyncio.run(client().complete_with_retry("hi", policy=fast_policy(max_attempts=5)))
+        assert seen["n"] == 1  # no retry attempted
+        assert excinfo.value.attempts == 1
+        assert excinfo.value.retried is False
+
+    def test_timeout_is_retried_and_classified(self, monkeypatch):
+        use_transport(
+            monkeypatch,
+            sequenced_handler(httpx.ReadTimeout("slow"), httpx.Response(200, json={"response": "ok"})),
+        )
+        result = asyncio.run(client().complete_with_retry("hi", policy=fast_policy()))
+        assert result.attempts == 2
+
+    def test_timeout_exhausted_is_classified_as_timeout(self, monkeypatch):
+        def handler(request):
+            raise httpx.ReadTimeout("slow")
+
+        use_transport(monkeypatch, handler)
+        with pytest.raises(OllamaTimeoutError) as excinfo:
+            asyncio.run(client().complete_with_retry("hi", policy=fast_policy(max_attempts=2)))
+        assert classify_error(excinfo.value) == "timeout"
+        assert excinfo.value.attempts == 2
+
+    def test_malformed_response_is_not_retried(self, monkeypatch):
+        seen = {"n": 0}
+
+        def handler(request):
+            seen["n"] += 1
+            return httpx.Response(200, json={"unexpected": 1})
+
+        use_transport(monkeypatch, handler)
+        with pytest.raises(OllamaResponseError):
+            asyncio.run(client().complete_with_retry("hi", policy=fast_policy(max_attempts=5)))
+        assert seen["n"] == 1
+
+    def test_default_policy_is_used_when_none_given(self, monkeypatch):
+        # client().retry_policy defaults to 3 attempts; make every attempt fail permanently
+        # fast so the test doesn't wait on the real default backoff.
+        c = client()
+        c.retry_policy = fast_policy(max_attempts=2)
+        seen = {"n": 0}
+
+        def handler(request):
+            seen["n"] += 1
+            return httpx.Response(500, text="boom")
+
+        use_transport(monkeypatch, handler)
+        with pytest.raises(OllamaError):
+            asyncio.run(c.complete_with_retry("hi"))
+        assert seen["n"] == 2
+
+    def test_backoff_actually_sleeps_between_retries(self, monkeypatch):
+        sleeps = []
+
+        async def fake_sleep(seconds):
+            sleeps.append(seconds)
+
+        monkeypatch.setattr(module.asyncio, "sleep", fake_sleep)
+        use_transport(
+            monkeypatch,
+            sequenced_handler(
+                httpx.Response(500, text="boom"), httpx.Response(200, json={"response": "ok"})
+            ),
+        )
+        policy = RetryPolicy(max_attempts=3, base_delay_seconds=1.0, max_delay_seconds=5.0, jitter_seconds=0.0)
+        asyncio.run(client().complete_with_retry("hi", policy=policy))
+        assert sleeps == [1.0]
+
+    def test_plain_complete_does_not_retry(self, monkeypatch):
+        seen = {"n": 0}
+
+        def handler(request):
+            seen["n"] += 1
+            return httpx.Response(500, text="boom")
+
+        use_transport(monkeypatch, handler)
+        with pytest.raises(OllamaError):
+            asyncio.run(client().complete("hi"))
+        assert seen["n"] == 1  # complete() never retries, only complete_with_retry() does

@@ -5,7 +5,7 @@ from pathlib import Path
 from pydantic import BaseModel, ValidationError
 
 from attacks.schema import TestCase
-from models.ollama_client import ollama_client
+from models.ollama_client import benchmark_session, ollama_client
 from runner.common import ResultsError, ensure_ollama_ready
 from runner.comparison import ComparisonReport, compute_comparison
 from runner.metrics import BaselineMetrics, compute_baseline_metrics
@@ -53,6 +53,8 @@ async def execute_run(
     results_dir: Path,
     seed: int | None = None,
     concurrency: int = DEFAULT_CONCURRENCY,
+    timeout: float | None = None,
+    max_retries: int | None = None,
 ) -> StoredRun:
     """Runs the benchmark with guardrails off ('baseline') or on ('guarded') and saves it."""
     if name not in RUN_NAMES:
@@ -68,7 +70,7 @@ async def execute_run(
         f"guardrails {'ON' if guardrails_enabled else 'OFF'}, "
         f"model {ollama_client.model}, seed {seed_text}, concurrency {concurrency}"
     )
-    async with ollama_client:  # one pooled HTTP client for every request in this run
+    async with benchmark_session(ollama_client, timeout=timeout, max_retries=max_retries):
         records = await run_tests(
             test_cases, guardrails_enabled, on_record=print_progress, concurrency=concurrency
         )

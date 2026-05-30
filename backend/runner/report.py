@@ -129,8 +129,15 @@ def format_experiment_report(agg: ExperimentAggregate) -> str:
     for failed in agg.failed_trials:
         lines.append(f"  FAILED trial {failed.config} seed {failed.seed}: {failed.error}")
 
-    lines += ["", f"{'':<25}{'Baseline':>20}{'Guarded':>20}"]
     base, guard = agg.configs[BASELINE], agg.configs[GUARDED]
+    for label, cfg in (("Baseline", base), ("Guarded", guard)):
+        nonzero_failures = {k: v for k, v in cfg.failures_by_status.items() if v}
+        lines.append(
+            f"{label}: {cfg.valid_evaluations}/{cfg.total_evaluations} evaluations valid "
+            f"({pct(cfg.valid_evaluation_rate)}); failures {nonzero_failures or 'none'}"
+        )
+
+    lines += ["", f"{'':<25}{'Baseline':>20}{'Guarded':>20}"]
     rows = (
         ("Attack success (mean)", base.asr, guard.asr),
         ("Tool misuse (mean)", base.tool_misuse_rate, guard.tool_misuse_rate),

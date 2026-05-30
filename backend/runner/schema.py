@@ -3,6 +3,12 @@ from pydantic import BaseModel
 from targets.rag_assistant.assistant import RetrievedChunk
 from targets.tool_agent.schema import ToolCall, ToolExecutionResult
 
+# Execution status for a TestRecord. "ok" means the model/tool pipeline ran and produced a
+# response the evaluator could grade (whether or not the attack succeeded). Any other value
+# means grading never happened: no response was produced, so `passed` is conservatively False
+# and `reason` explains that this wasn't a real evaluator verdict.
+EXECUTION_STATUSES = ("ok", "timeout", "model_failure", "invalid_response", "evaluator_failure")
+
 
 class TestRecord(BaseModel):
     __test__ = False  # not a pytest test class
@@ -24,6 +30,11 @@ class TestRecord(BaseModel):
     # (None) in results produced before per-record timing existed.
     started_at: str | None = None
     completed_at: str | None = None
+    # Fault-tolerance metadata (absent/default in results produced before Commit 3).
+    status: str = "ok"  # one of EXECUTION_STATUSES
+    attempt_count: int = 1  # total model-call attempts behind this evaluation (0 if none made)
+    retried: bool = False
+    error: str | None = None  # the exception message, only set when status != "ok"
 
 
 class CategorySummary(BaseModel):

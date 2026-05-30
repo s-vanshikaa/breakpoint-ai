@@ -13,6 +13,14 @@ class Settings(BaseSettings):
     ollama_model: str = "llama3.2:1b"
     ollama_timeout_seconds: float = 120.0
 
+    # Retry policy for transient model-call failures (timeouts, connection errors, 429/5xx).
+    # max_attempts=3 means up to 2 retries after the first try; keep this conservative so a
+    # flaky run doesn't silently take multiples of the expected time.
+    ollama_retry_max_attempts: int = 3
+    ollama_retry_base_delay_seconds: float = 0.5
+    ollama_retry_max_delay_seconds: float = 5.0
+    ollama_retry_jitter_seconds: float = 0.25
+
     # Comma-separated list of origins allowed to call the API (the dashboard).
     cors_origins: str = "http://localhost:5173"
 

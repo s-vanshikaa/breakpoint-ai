@@ -1,15 +1,47 @@
 import asyncio
+import time
 from collections import defaultdict
 from collections.abc import Callable
 from datetime import datetime, timezone
 
 from attacks.schema import TestCase
 from evaluators.evaluators import evaluate_test_case
+from models.ollama_client import OllamaError, classify_error
 from runner.schema import CategorySummary, RunSummary, TestRecord
 from targets.rag_assistant.assistant import RAGAssistant
 from targets.tool_agent.agent import ToolAgent
 
 DEFAULT_CONCURRENCY = 1  # sequential by default; --concurrency opts into overlap
+
+
+def _failed_record(
+    test_case: TestCase,
+    guardrails_enabled: bool,
+    status: str,
+    error: str,
+    latency_ms: float,
+    attempt_count: int,
+    retried: bool,
+    response: str = "",
+) -> TestRecord:
+    """A TestRecord for a case that never got a real evaluator verdict. `passed=False` is a
+    conservative choice (an unverifiable attack is not a confirmed defense), not a graded
+    result; `status`/`error` are what distinguish this from an actual evaluator FAIL."""
+    return TestRecord(
+        test_id=test_case.id,
+        category=test_case.category.value,
+        target=test_case.target.value,
+        prompt=test_case.prompt,
+        response=response,
+        passed=False,
+        reason=f"not evaluated ({status}): {error}",
+        latency_ms=latency_ms,
+        guardrails_enabled=guardrails_enabled,
+        status=status,
+        attempt_count=attempt_count,
+        retried=retried,
+        error=error,
+    )
 
 
 async def run_test_case(
@@ -18,9 +50,31 @@ async def run_test_case(
     tool_agent: ToolAgent,
     guardrails_enabled: bool = False,
 ) -> TestRecord:
+    """Runs one test case end to end. Model-call failures (after retries) and evaluator bugs
+    are caught here and turned into a structured failed TestRecord rather than raised, so one
+    bad case can't take down the rest of a run (see run_tests). Anything else still raises,
+    since that's more likely a real bug than an expected failure mode."""
+    start = time.perf_counter()
+
     if test_case.target.value == "rag_assistant":
-        result = await rag_assistant.answer(test_case.prompt, guardrails_enabled=guardrails_enabled)
-        evaluation = evaluate_test_case(test_case, response_text=result.response)
+        try:
+            result = await rag_assistant.answer(
+                test_case.prompt, guardrails_enabled=guardrails_enabled
+            )
+        except OllamaError as e:
+            return _failed_record(
+                test_case, guardrails_enabled, classify_error(e), str(e),
+                (time.perf_counter() - start) * 1000, e.attempts or 1, bool(e.retried),
+            )
+
+        try:
+            evaluation = evaluate_test_case(test_case, response_text=result.response)
+        except Exception as e:
+            return _failed_record(
+                test_case, guardrails_enabled, "evaluator_failure", str(e),
+                result.latency_ms, result.model_attempts, result.model_retried, result.response,
+            )
+
         return TestRecord(
             test_id=test_case.id,
             category=test_case.category.value,
@@ -33,14 +87,30 @@ async def run_test_case(
             latency_ms=result.latency_ms,
             guardrails_enabled=guardrails_enabled,
             block_reason=result.block_reason,
+            attempt_count=result.model_attempts,
+            retried=result.model_retried,
         )
 
-    result = await tool_agent.handle(test_case.prompt, guardrails_enabled=guardrails_enabled)
-    evaluation = evaluate_test_case(
-        test_case,
-        response_text=result.response,
-        executed_tool_call=result.executed_tool_call,
-    )
+    try:
+        result = await tool_agent.handle(test_case.prompt, guardrails_enabled=guardrails_enabled)
+    except OllamaError as e:
+        return _failed_record(
+            test_case, guardrails_enabled, classify_error(e), str(e),
+            (time.perf_counter() - start) * 1000, e.attempts or 1, bool(e.retried),
+        )
+
+    try:
+        evaluation = evaluate_test_case(
+            test_case,
+            response_text=result.response,
+            executed_tool_call=result.executed_tool_call,
+        )
+    except Exception as e:
+        return _failed_record(
+            test_case, guardrails_enabled, "evaluator_failure", str(e),
+            result.latency_ms, result.model_attempts, result.model_retried, result.response,
+        )
+
     return TestRecord(
         test_id=test_case.id,
         category=test_case.category.value,
@@ -54,6 +124,8 @@ async def run_test_case(
         latency_ms=result.latency_ms,
         guardrails_enabled=guardrails_enabled,
         block_reason=result.block_reason,
+        attempt_count=result.model_attempts,
+        retried=result.model_retried,
     )
 
 
@@ -107,6 +179,14 @@ async def run_tests(
     if errors:
         raise errors[0]
     return [record for _, record in ok]
+
+
+def status_counts(records: list[TestRecord]) -> dict[str, int]:
+    """How many records ended in each execution status (see runner.schema.EXECUTION_STATUSES)."""
+    counts: dict[str, int] = defaultdict(int)
+    for r in records:
+        counts[r.status] += 1
+    return dict(counts)
 
 
 def summarize(records: list[TestRecord], guardrails_enabled: bool = False) -> RunSummary:

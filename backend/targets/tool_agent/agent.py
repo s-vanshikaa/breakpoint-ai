@@ -103,9 +103,12 @@ class ToolAgent:
                     block_reason=input_block_reason,
                 )
 
-        raw_decision = await ollama_client.complete(
+        decision_result = await ollama_client.complete_with_retry(
             prompt, system=SYSTEM_PROMPT, options={"temperature": 0.1}
         )
+        raw_decision = decision_result.text
+        model_attempts = decision_result.attempts
+        model_retried = decision_result.retried
         decision = _parse_tool_decision(raw_decision)
 
         tool_name = decision.get("tool")
@@ -145,7 +148,10 @@ class ToolAgent:
                     f"Tool result: {result}\n\n"
                     "Respond to the user based on this tool result. Be concise."
                 )
-                response = await ollama_client.complete(follow_up_prompt)
+                follow_up_result = await ollama_client.complete_with_retry(follow_up_prompt)
+                response = follow_up_result.text
+                model_attempts += follow_up_result.attempts
+                model_retried = model_retried or follow_up_result.retried
 
         latency_ms = (time.perf_counter() - start) * 1000
 
@@ -156,4 +162,6 @@ class ToolAgent:
             model=ollama_client.model,
             latency_ms=latency_ms,
             block_reason=block_reason,
+            model_attempts=model_attempts,
+            model_retried=model_retried,
         )

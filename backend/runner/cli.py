@@ -17,7 +17,7 @@ from attacks.loader import DatasetError, filter_by_category, load_test_cases
 from attacks.schema import AttackCategory
 from attacks.validate import find_problems
 from config import settings
-from models.ollama_client import ollama_client
+from models.ollama_client import benchmark_session, ollama_client
 from runner import experiment, report, workflow
 from runner.common import ensure_ollama_ready, run_cli
 from runner.runner import DEFAULT_CONCURRENCY, run_tests, summarize
@@ -59,6 +59,29 @@ def build_parser() -> argparse.ArgumentParser:
             ),
         )
 
+    def add_reliability(p: argparse.ArgumentParser) -> None:
+        p.add_argument(
+            "--timeout",
+            type=float,
+            default=None,
+            help=(
+                "Per-request timeout in seconds "
+                f"(default: {settings.ollama_timeout_seconds:.0f})."
+            ),
+        )
+        p.add_argument(
+            "--max-retries",
+            type=int,
+            default=None,
+            dest="max_retries",
+            help=(
+                "Total attempts per model call, including the first (default: "
+                f"{settings.ollama_retry_max_attempts}). 1 disables retries. Retries only "
+                "transient failures (timeouts, connection errors, HTTP 429/500/502/503) with "
+                "exponential backoff."
+            ),
+        )
+
     sub.add_parser("validate", help="Validate the benchmark dataset (no LLM needed).")
 
     for name, help_text in (
@@ -70,6 +93,7 @@ def build_parser() -> argparse.ArgumentParser:
         add_seed(p)
         add_results_dir(p)
         add_concurrency(p)
+        add_reliability(p)
 
     p = sub.add_parser(
         "compare", help="Compare saved baseline/guarded runs and save comparison.json."
@@ -85,12 +109,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         nargs="+",
         default=[1, 2, 3, 4, 5],
-        help="One trial per seed and configuration (default: 1 2 3 4 5).",
+        help="One trial per seed and configuration (default: 1 2 3 4 5). Ignored with --resume.",
     )
     p.add_argument(
         "--experiment-id",
         default=None,
-        help="Name for the output folder (default: exp-<UTC timestamp>).",
+        help="Name for the output folder (default: exp-<UTC timestamp>). Ignored with --resume.",
     )
     p.add_argument(
         "--experiments-dir",
@@ -98,7 +122,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=f"Where experiments are written (default: {settings.experiments_dir}).",
     )
+    p.add_argument(
+        "--resume",
+        default=None,
+        metavar="EXPERIMENT_ID",
+        help=(
+            "Resume an interrupted experiment by ID instead of starting a new one. Reuses its "
+            "original seeds, configurations and concurrency; skips trials already completed "
+            "and continues any others from their checkpoint."
+        ),
+    )
     add_concurrency(p)
+    add_reliability(p)
 
     p = sub.add_parser("run", help="Ad hoc run of one test or one category; nothing is saved.")
     p.add_argument("--test-id", help="Run a single test case by ID.")
@@ -107,6 +142,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output", type=Path, help="Optional path to save the raw records as JSON.")
     add_seed(p)
     add_concurrency(p)
+    add_reliability(p)
     return parser
 
 
@@ -127,7 +163,8 @@ async def _cmd_run_benchmark(names: list[str], args: argparse.Namespace) -> None
     results_dir = args.results_dir or settings.results_dir
     for name in names:
         stored = await workflow.execute_run(
-            name, test_cases, results_dir, seed=args.seed, concurrency=args.concurrency
+            name, test_cases, results_dir, seed=args.seed, concurrency=args.concurrency,
+            timeout=args.timeout, max_retries=args.max_retries,
         )
         print()
         print(report.format_run_report(name, stored.metrics, stored.records, stored.meta))
@@ -142,13 +179,25 @@ def _cmd_compare(args: argparse.Namespace) -> None:
 
 
 async def _cmd_experiment(args: argparse.Namespace) -> None:
-    _, aggregate = await experiment.run_experiment(
-        load_test_cases(),
-        args.seeds,
-        args.experiments_dir or settings.experiments_dir,
-        experiment_id=args.experiment_id,
-        concurrency=args.concurrency,
-    )
+    experiments_dir = args.experiments_dir or settings.experiments_dir
+    if args.resume:
+        _, aggregate = await experiment.resume_experiment(
+            load_test_cases(),
+            experiments_dir,
+            args.resume,
+            timeout=args.timeout,
+            max_retries=args.max_retries,
+        )
+    else:
+        _, aggregate = await experiment.run_experiment(
+            load_test_cases(),
+            args.seeds,
+            experiments_dir,
+            experiment_id=args.experiment_id,
+            concurrency=args.concurrency,
+            timeout=args.timeout,
+            max_retries=args.max_retries,
+        )
     print()
     print(report.format_experiment_report(aggregate))
 
@@ -165,7 +214,7 @@ async def _cmd_run_adhoc(args: argparse.Namespace) -> None:
     await ensure_ollama_ready()
     ollama_client.default_options = {"seed": args.seed} if args.seed is not None else {}
     print(f"Running {len(cases)} test case(s) (guardrails_enabled={args.guardrails})...")
-    async with ollama_client:
+    async with benchmark_session(ollama_client, timeout=args.timeout, max_retries=args.max_retries):
         records = await run_tests(
             cases, args.guardrails, on_record=workflow.print_progress, concurrency=args.concurrency
         )

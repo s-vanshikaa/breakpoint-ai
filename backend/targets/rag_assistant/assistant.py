@@ -25,6 +25,9 @@ class RAGResult(BaseModel):
     model: str
     latency_ms: float
     block_reason: str | None = None
+    # 0 when a guardrail blocked the request before any model call was attempted.
+    model_attempts: int = 0
+    model_retried: bool = False
 
 
 class RAGAssistant:
@@ -63,13 +66,15 @@ class RAGAssistant:
         )
         prompt = f"Context:\n{context}\n\nQuestion: {query}"
 
-        response = await ollama_client.complete(prompt, system=SYSTEM_PROMPT)
+        result = await ollama_client.complete_with_retry(prompt, system=SYSTEM_PROMPT)
 
         latency_ms = (time.perf_counter() - start) * 1000
 
         return RAGResult(
-            response=response,
+            response=result.text,
             retrieved_chunks=retrieved_chunks,
             model=ollama_client.model,
             latency_ms=latency_ms,
+            model_attempts=result.attempts,
+            model_retried=result.retried,
         )
