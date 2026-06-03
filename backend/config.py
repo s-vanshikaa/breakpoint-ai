@@ -47,5 +47,9 @@ class Settings(BaseSettings):
     def experiments_dir(self) -> Path:
         return self.data_dir / "experiments"
 
+    @property
+    def benchmarks_dir(self) -> Path:
+        return self.data_dir / "benchmarks"
+
 
 settings = Settings()

@@ -1,0 +1,160 @@
+{
+  "benchmark_id": "benchmark-20260922T040035Z",
+  "created_at": "2026-09-22T04:01:28+00:00",
+  "config": {
+    "seed": 0,
+    "concurrencies": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "performance_jobs_per_run": 300,
+    "performance_latency_ms": 50.0,
+    "reliability_failure_rates": [
+      0.0,
+      0.05,
+      0.1,
+      0.2
+    ],
+    "reliability_jobs_per_run": 300,
+    "reliability_concurrency": 4,
+    "client_timeout_seconds": 2.0,
+    "max_retries": 3
+  },
+  "environment": {
+    "python_version": "3.13.5",
+    "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O"
+  },
+  "performance": [
+    {
+      "concurrency": 1,
+      "total_jobs": 300,
+      "valid_jobs": 300,
+      "failed_jobs": 0,
+      "duration_seconds": 16.7877027909999,
+      "throughput_per_sec": 17.870223444796377,
+      "p50_ms": 55.50814549496863,
+      "p95_ms": 57.409554155310616,
+      "p99_ms": 69.05023465864359,
+      "retry_count": 0,
+      "timeout_count": 0
+    },
+    {
+      "concurrency": 2,
+      "total_jobs": 300,
+      "valid_jobs": 300,
+      "failed_jobs": 0,
+      "duration_seconds": 8.697090999994543,
+      "throughput_per_sec": 34.49429240192936,
+      "p50_ms": 57.370250004169066,
+      "p95_ms": 59.33424789982382,
+      "p99_ms": 61.29327166723669,
+      "retry_count": 0,
+      "timeout_count": 0
+    },
+    {
+      "concurrency": 4,
+      "total_jobs": 300,
+      "valid_jobs": 300,
+      "failed_jobs": 0,
+      "duration_seconds": 4.405719791990123,
+      "throughput_per_sec": 68.09330011078303,
+      "p50_ms": 57.37050000607269,
+      "p95_ms": 63.25516454526223,
+      "p99_ms": 70.76643426800729,
+      "retry_count": 0,
+      "timeout_count": 0
+    },
+    {
+      "concurrency": 8,
+      "total_jobs": 300,
+      "valid_jobs": 300,
+      "failed_jobs": 0,
+      "duration_seconds": 2.1928778330038767,
+      "throughput_per_sec": 136.80652678633268,
+      "p50_ms": 56.724604008195456,
+      "p95_ms": 62.31947915148339,
+      "p99_ms": 65.59221782590612,
+      "retry_count": 0,
+      "timeout_count": 0
+    }
+  ],
+  "reliability": [
+    {
+      "injected_failure_rate": 0.0,
+      "total_jobs": 300,
+      "completed": 300,
+      "completion_rate": 1.0,
+      "recovered": 0,
+      "permanent_failures": 0,
+      "total_retries": 0,
+      "duplicate_job_ids": 0,
+      "duration_seconds": 0.25597325000853743,
+      "failures_by_status": {
+        "timeout": 0,
+        "model_failure": 0,
+        "invalid_response": 0,
+        "evaluator_failure": 0
+      }
+    },
+    {
+      "injected_failure_rate": 0.05,
+      "total_jobs": 300,
+      "completed": 295,
+      "completion_rate": 0.9833333333333333,
+      "recovered": 11,
+      "permanent_failures": 5,
+      "total_retries": 11,
+      "duplicate_job_ids": 0,
+      "duration_seconds": 2.5009251669980586,
+      "failures_by_status": {
+        "timeout": 0,
+        "model_failure": 0,
+        "invalid_response": 5,
+        "evaluator_failure": 0
+      }
+    },
+    {
+      "injected_failure_rate": 0.1,
+      "total_jobs": 300,
+      "completed": 292,
+      "completion_rate": 0.9733333333333334,
+      "recovered": 28,
+      "permanent_failures": 8,
+      "total_retries": 31,
+      "duplicate_job_ids": 0,
+      "duration_seconds": 4.356898541998817,
+      "failures_by_status": {
+        "timeout": 0,
+        "model_failure": 0,
+        "invalid_response": 8,
+        "evaluator_failure": 0
+      }
+    },
+    {
+      "injected_failure_rate": 0.2,
+      "total_jobs": 300,
+      "completed": 282,
+      "completion_rate": 0.94,
+      "recovered": 53,
+      "permanent_failures": 18,
+      "total_retries": 63,
+      "duplicate_job_ids": 0,
+      "duration_seconds": 8.527590083001996,
+      "failures_by_status": {
+        "timeout": 0,
+        "model_failure": 0,
+        "invalid_response": 18,
+        "evaluator_failure": 0
+      }
+    }
+  ],
+  "resume_drill": {
+    "total_jobs": 40,
+    "jobs_before_interruption": 20,
+    "jobs_after_resume": 20,
+    "duplicate_job_ids": 0,
+    "all_ids_present_exactly_once": true
+  }
+}
